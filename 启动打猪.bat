@@ -14,8 +14,8 @@ echo ============================================
 echo 启动中... (关闭本窗口即停止脚本)
 echo.
 echo [1/2] 检查并清理残留进程/锁...
-rem 按命令行匹配杀旧 bot(不要按窗口标题匹配——标题会匹配到本窗口把自己杀掉)
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { $_.CommandLine -match 'auto_combat' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+rem 按命令行匹配杀旧 bot(匹配串 'auto'+'_combat' 拼接, 防止 powershell 匹配到自己的命令行自杀)
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='auto'+'_combat'; Get-CimInstance Win32_Process -Filter 'Name=''python.exe''' | Where-Object { $_.CommandLine -match $p } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 del /Q "%TEMP%\auto_combat_ms.lock" >nul 2>&1
 echo [2/2] 启动 bot...
 set "PY=C:\quant_lab\lstm_gpu_venv\Scripts\python.exe"

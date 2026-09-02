@@ -35,6 +35,12 @@ import numpy as np
 import yaml
 from windows_capture import Frame, InternalCaptureControl, WindowsCapture
 
+try:
+    from src.utils.logger import logger
+except Exception:  # viewer 独立运行时回退到 stdlib logging
+    import logging
+    logger = logging.getLogger("yolo_monster_viewer")
+
 
 WINDOW_TITLE = "YOLO Monster Detector - OBSERVE ONLY"
 DEFAULT_MODEL = "training_runs/two_class_real_v2_1280/weights/best.pt"
@@ -1070,6 +1076,8 @@ class ReadOnlyPlayerDetector:
         color_anchor_name_offset_y=24,
         color_anchor_min_red_fraction=0.02,
         color_anchor_local_radius=260.0,
+        color_anchor_color_tol=80.0,
+        color_anchor_ref_path=None,
         keep_color_anchor_misses=6,
     ):
         resolved = Path(template_path)
@@ -1104,7 +1112,14 @@ class ReadOnlyPlayerDetector:
         self.color_anchor_name_offset_y = int(color_anchor_name_offset_y)
         self.color_anchor_min_red_fraction = float(color_anchor_min_red_fraction)
         self.color_anchor_local_radius = float(color_anchor_local_radius)
+        self.color_anchor_color_tol = float(color_anchor_color_tol)
         self.keep_color_anchor_misses = int(keep_color_anchor_misses)
+        # 【蓝条颜色参照】: 候选称号条的蓝色像素均值必须接近自己勋章蓝(参照图/
+        # 名字模板中的蓝像素均值作为冷启动参照, 锁定后按实际蓝条 EMA 微调)。
+        # 地形/瀑布/岩石的蓝与中级冒险家勋章的同款蓝有明显色差, 色距超
+        # color_tol 直接丢弃——否则"红棕色地形(红分高) + 一条蓝条"就能拿到
+        # identity_score=1.0, 黄框锁到地形(用户反馈: 置信1.00锁地形, 巡游掉台子)。
+        self.color_anchor_ref_bgr = self._template_blue_ref(ref_path=color_anchor_ref_path)
         if not 0.0 <= self.identity_threshold <= 1.0:
             raise ValueError("identity_threshold must be in [0, 1]")
         if not 0.0 <= self.local_identity_threshold <= 1.0:
@@ -1154,6 +1169,38 @@ class ReadOnlyPlayerDetector:
             | cv2.inRange(hsv, (170, 100, 80), (179, 255, 255))
         )
         return float(np.count_nonzero(mask)) / float(mask.size)
+
+    def _template_blue_ref(self, ref_path=None):
+        """从参照图(或名字模板)提取蓝色称号条的平均 BGR(蓝色像素均值)作颜色参照。
+
+        参照图是离线截取的自己称号条(勋章), 与游戏内勋章是同款 UI 蓝;
+        地形/瀑布的"蓝"与之有明显色差, 用它滤地形误检。参照图无蓝像素时返回
+        None(颜色门不生效, 退回旧行为)。"""
+        image = None
+        if ref_path:
+            _rp = Path(ref_path)
+            if not _rp.is_absolute():
+                _rp = REPO_ROOT / _rp
+            if _rp.exists():
+                data = np.fromfile(str(_rp), dtype=np.uint8)
+                image = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        if image is None:
+            image = getattr(self, "template", None)
+        if image is None or image.size == 0:
+            return None
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, (90, 80, 50), (135, 255, 255))
+        if int(mask.sum()) == 0:
+            return None
+        return tuple(float(v) for v in image[mask > 0].reshape(-1, 3).mean(axis=0))
+
+    @staticmethod
+    def _strip_blue_bgr(patch_bgr, patch_hsv):
+        """称号条候选区域内"蓝像素"的均值 BGR; 无蓝像素返回 None。"""
+        mask = cv2.inRange(patch_hsv, (90, 80, 50), (135, 255, 255))
+        if int(mask.sum()) == 0:
+            return None
+        return tuple(float(v) for v in patch_bgr[mask > 0].reshape(-1, 3).mean(axis=0))
 
     def _find_color_anchor(self, gameplay):
         """Find the player's long blue title strip without OCR.
@@ -1258,6 +1305,23 @@ class ReadOnlyPlayerDetector:
             # 红分不足由 color_anchor_hold(6帧保持)兜底。
             if red_fraction < self.color_anchor_min_red_fraction:
                 continue
+            # 【蓝条颜色参照门】: 候选条蓝色像素均值必须接近自己勋章蓝。
+            # 地形误检(红棕岩石+瀑布淡蓝)几何/红分都能通过, 只有颜色能滤掉。
+            strip_blue = None
+            if self.color_anchor_ref_bgr is not None:
+                strip_blue = self._strip_blue_bgr(
+                    gameplay[y : y + box_height, x : x + box_width],
+                    hsv[y : y + box_height, x : x + box_width],
+                )
+                if strip_blue is not None:
+                    _cdist = float(
+                        np.abs(
+                            np.asarray(strip_blue)
+                            - np.asarray(self.color_anchor_ref_bgr)
+                        ).sum()
+                    )
+                    if _cdist > self.color_anchor_color_tol:
+                        continue
             fill = float(area) / float(box_width * box_height)
             shape_score = min(1.0, fill / 0.35)
             red_score = min(1.0, red_fraction / 0.12)
@@ -1270,6 +1334,7 @@ class ReadOnlyPlayerDetector:
                     "identity_score": float(identity_score),
                     "anchor_box": [x, y, box_width, box_height],
                     "red_fraction": float(red_fraction),
+                    "blue_bgr": strip_blue,
                 }
             )
         if not proposals:
@@ -1313,6 +1378,29 @@ class ReadOnlyPlayerDetector:
             and best["identity_score"] < self.identity_threshold
         ):
             return None
+        # 参照色 EMA 微调: 只吸收"强匹配"(色距 <= tol*0.6)的蓝条, 防止被
+        # 偶尔通过门槛的杂蓝牵着走; 轻度遮挡/光影变化时参照色跟着实际蓝条走。
+        if (self.color_anchor_ref_bgr is not None and best.get("blue_bgr") is not None):
+            _cdist = float(
+                np.abs(
+                    np.asarray(best["blue_bgr"])
+                    - np.asarray(self.color_anchor_ref_bgr)
+                ).sum()
+            )
+            if _cdist <= self.color_anchor_color_tol * 0.6:
+                self.color_anchor_ref_bgr = tuple(
+                    0.7 * r + 0.3 * b
+                    for r, b in zip(self.color_anchor_ref_bgr, best["blue_bgr"])
+                )
+            elif _cdist > self.color_anchor_color_tol * 0.6:
+                # 可疑锁定(色距偏高仍被接受): 打日志便于调参(蓝条颜色/距离)
+                logger.info(
+                    f"[color_anchor] 蓝条色距偏高仍锁定: blueBGR="
+                    f"({best['blue_bgr'][0]:.0f},{best['blue_bgr'][1]:.0f},"
+                    f"{best['blue_bgr'][2]:.0f}) 参照=({self.color_anchor_ref_bgr[0]:.0f},"
+                    f"{self.color_anchor_ref_bgr[1]:.0f},{self.color_anchor_ref_bgr[2]:.0f}) "
+                    f"dist={_cdist:.0f}/{self.color_anchor_color_tol:.0f} "
+                    f"置信={best['identity_score']:.2f} 红分={best['red_fraction']:.3f}")
         return best
 
     def _title_strip_proposals(self, gameplay, ref_color=None, color_tol=60):
@@ -2760,6 +2848,10 @@ def main():
             color_anchor_local_radius=float(
                 overlay_cfg.get("player_color_anchor_local_radius", 260.0)
             ),
+            color_anchor_color_tol=float(
+                overlay_cfg.get("player_color_anchor_color_tol", 80.0)
+            ),
+            color_anchor_ref_path=overlay_cfg.get("player_color_anchor_ref_file"),
         )
         if (
             args.player_name

@@ -157,6 +157,12 @@ perception_overlay:
   player_color_anchor_name_offset_y: 24 # 称号条顶部到名字框顶部的像素偏移
   player_color_anchor_min_red_fraction: 0.02 # 称号推导位置附近必须有少量红色角色特征
   player_color_anchor_local_radius: 260 # 跳跃/遮挡时只在上一帧预测位置附近重捕获称号
+  # 【蓝条颜色参照门】: 候选称号条的蓝色像素均值必须接近自己勋章蓝(参照图,
+  # 色距按 BGR 三通道绝对差之和)。地形/瀑布/岩石的蓝与勋章蓝色差通常 150~300,
+  # 会被直接丢弃——否则"红棕地形+蓝条"能拿到置信1.0, 黄框锁地形导致巡游掉台子
+  player_color_anchor_color_tol: 80
+  # 蓝条颜色参照图(离线截图, 自己勋章的蓝条; 缺省用 nametag 模板里的蓝)
+  player_color_anchor_ref_file: "nametag/麻超圆_勋章.png"
   monster_refresh_frames: 2
   stump_template: "monster/black_axe_stump/black_axe_stump_1.png"
   stump_scale: 0.85
