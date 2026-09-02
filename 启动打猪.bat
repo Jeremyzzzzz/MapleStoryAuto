@@ -1,8 +1,8 @@
 @echo off
-title 冒险岛自动打猪 - 纯点位巡航模式 (v10)
+title 冒险岛自动打猪 - 纯点位巡航模式 (v10.1)
 cd /d "%~dp0"
 echo ============================================
-echo   冒险岛自动打猪 v10 (回退稳定版: 纯点位巡航 + 顺路打怪)
+echo   冒险岛自动打猪 v10.1 (纯点位巡航 + 顺路打怪 + 下跳)
 echo   玩家定位: color_anchor 色块锚点 (no-ocr)
 echo   怪物检测: YOLO 野猪 + 树妖(木妖) 双模型
 echo   其他玩家: 小地图红点检测 (R1/R2, 检测到即挂机)
@@ -14,8 +14,8 @@ echo ============================================
 echo 启动中... (关闭本窗口即停止脚本)
 echo.
 echo [1/2] 检查并清理残留进程/锁...
-taskkill /F /FI "WINDOWTITLE eq 冒险岛自动打猪*" >nul 2>&1
-taskkill /F /IM python.exe /FI "WINDOWTITLE eq *auto_combat*" >nul 2>&1
+rem 按命令行匹配杀旧 bot(不要按窗口标题匹配——标题会匹配到本窗口把自己杀掉)
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { $_.CommandLine -match 'auto_combat' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 del /Q "%TEMP%\auto_combat_ms.lock" >nul 2>&1
 echo [2/2] 启动 bot...
 set "PY=C:\quant_lab\lstm_gpu_venv\Scripts\python.exe"
