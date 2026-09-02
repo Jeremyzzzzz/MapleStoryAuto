@@ -1039,6 +1039,10 @@ class CombatExecutor:
         self.attack_hold_seconds = float(auto_cfg.get("attack_hold_seconds", 0.08))
         self.dodge_hold_seconds = float(auto_cfg.get("dodge_hold_seconds", 0.18))
         self.step_hold_seconds = float(auto_cfg.get("step_hold_seconds", 0.06))
+        # 下跳参数(minimap_waypoint): 先按住↓再起跳穿越台子, 穿过即松开防穿透下层
+        _wp = cfg.get("minimap_waypoint", {})
+        self.jump_down_pre_hold = float(_wp.get("jump_down_pre_hold", 0.15))
+        self.jump_down_hold_seconds = float(_wp.get("jump_down_hold_seconds", 0.55))
         self.turn_hold_seconds = float(auto_cfg.get("turn_hold_seconds", 0.08))
         self.turn_pause_seconds = float(auto_cfg.get("turn_pause_seconds", 0.05))
         self.rest_hold_seconds = float(auto_cfg.get("rest_hold_seconds", 0.5))
@@ -1256,11 +1260,18 @@ class CombatExecutor:
             self._press(self.jump_key, 0.08)
             self._count("jump")
         elif command == "jump_down":
-            # 下跳(往下的下jump): 跳起后短按↓(穿平台/落到下层)
+            # 下跳(跳到下方同X平台): 【先按住↓键, 再起跳, ↓保持穿过台子后松开】。
+            # 只按跳键会跳起落回原台子; 先按下键再跳, 角色从站立平台直接落到
+            # 下层平台(用户要求: 先下键后跳跃)。↓保持太久会穿透更下层平台,
+            # 因此穿过台子(起跳后 jump_down_hold_seconds)就松开。
             self._set_move(None)
-            self._set_vert(None)
-            self._press(self.jump_key, 0.08)
-            self._press("down", 0.12)
+            self._set_vert("down")                        # ①先按住↓(穿台子必需)
+            if not self.dry_run:
+                time.sleep(self.jump_down_pre_hold)       # 提前量: 保证按下键已生效
+            self._press(self.jump_key, 0.08)              # ②按住↓状态下起跳
+            if not self.dry_run:
+                time.sleep(self.jump_down_hold_seconds)   # ③下落过程中保持↓穿过台子
+            self._set_vert(None)                          # ④已穿过台子, 松开↓
             self._count("jump_down")
         elif command == "jump_climb":
             # 爬绳跳(旧兼容): 起跳后立刻按住上(跳起碰到绳子即抓绳)
@@ -4176,6 +4187,28 @@ class MinimapWaypointPatrol:
                 self._next()
                 self._next()
                 return "none", "wp_arrived"
+            # 【下跳(跳下)专用】: 落地比起跳点低 = 穿台成功, 不是坠落——
+            # 不允许"坠落重头", 否则成功下跳会被误判失败从头开始
+            if self._jump_mode == "down":
+                if ny <= self._jump_takeoff_ny + 0.02:
+                    # 没穿下去(落回原平台): 有限重试下跳, 超限则同Y恢复
+                    self._retry_count += 1
+                    if self._retry_count >= self.retry_max:
+                        logger.warning(
+                            f"[wp] 段{self.idx + 1} 下跳失败{self._retry_count}次, "
+                            f"同平台点位恢复")
+                        self._recover_same_y(ny)
+                    else:
+                        self._point_start = now
+                        self._action_state = ""
+                        self._action_at = 0.0
+                        logger.warning(
+                            f"[wp] 段{self.idx + 1} 下跳未穿台(落地y={ny:.4f}≈起跳y"
+                            f"={self._jump_takeoff_ny:.4f}), 重试第{self._retry_count}次")
+                    return "none", "wp_jump_retry"
+                # 已落到下层但没碰到目标点 -> 同 Y 恢复(目标点同层, 从目标点继续)
+                self._recover_same_y(ny)
+                return "none", "wp_recover"
             # 坠落检测: 落地 Y 比起跳点 Y 大(小地图 y 向下为正, y 大=更低层)
             # = 角色从台阶上掉下去了 -> 恢复循环, 从头重新开始
             if ny > self._jump_takeoff_ny + 0.02:
@@ -5308,6 +5341,7 @@ def _cmd_cn(command, reason):
         "move_left": "← 向左走", "move_right": "→ 向右走",
         "climb_up": "↑ 爬绳", "climb_down": "↓ 下绳",
         "jump": "⤴ 原地跳", "jump_left": "⤴ 左跳", "jump_right": "⤴ 右跳",
+        "jump_down": "⤵ 下跳",
         "attack_left": "⚔ 左攻击", "attack_right": "⚔ 右攻击",
         "dodge_left": "↶ 左闪避", "dodge_right": "↷ 右闪避",
         "none": "· 原地待命",
