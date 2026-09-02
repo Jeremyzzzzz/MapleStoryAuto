@@ -19,7 +19,9 @@ test/
 training_data/
 yolo26n.pt
 runs/
-# 训练输出全部忽略; 仅 wild_boar_real_hardneg_v4_960/weights/best.pt 用 git add -f 强制入库(运行时必需)
+# 训练输出全部忽略; 仅两个运行时必需的权重用 git add -f 强制入库:
+#   wild_boar_real_hardneg_v4_960/weights/best.pt (野猪)
+#   warrior_stump_hardneg_v2_1280/weights/best.pt (树妖/木妖)
 training_runs/
 downloads/
 probe_output/
