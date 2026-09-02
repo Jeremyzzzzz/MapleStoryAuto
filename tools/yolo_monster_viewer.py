@@ -1120,6 +1120,7 @@ class ReadOnlyPlayerDetector:
         # color_tol 直接丢弃——否则"红棕色地形(红分高) + 一条蓝条"就能拿到
         # identity_score=1.0, 黄框锁到地形(用户反馈: 置信1.00锁地形, 巡游掉台子)。
         self.color_anchor_ref_bgr = self._template_blue_ref(ref_path=color_anchor_ref_path)
+        self._ref_warn_at = 0.0  # "色距偏高仍锁定"告警节流时间戳
         if not 0.0 <= self.identity_threshold <= 1.0:
             raise ValueError("identity_threshold must be in [0, 1]")
         if not 0.0 <= self.local_identity_threshold <= 1.0:
@@ -1378,8 +1379,10 @@ class ReadOnlyPlayerDetector:
             and best["identity_score"] < self.identity_threshold
         ):
             return None
-        # 参照色 EMA 微调: 只吸收"强匹配"(色距 <= tol*0.6)的蓝条, 防止被
-        # 偶尔通过门槛的杂蓝牵着走; 轻度遮挡/光影变化时参照色跟着实际蓝条走。
+        # 参照色 EMA 微调: 吸收"较可靠匹配"(色距 <= tol*0.9)的蓝条——
+        # 离线参照图与实时蓝条有亮度差(实测量到 70/80), 只收 0.6 会让参照色
+        # 永远停在离线值, 每帧都打"色距偏高"日志; 吸 0.9 后参照色收敛到实时
+        # 蓝条, 后续判定更准。轻度遮挡/光影变化时参照色跟着实际蓝条走。
         if (self.color_anchor_ref_bgr is not None and best.get("blue_bgr") is not None):
             _cdist = float(
                 np.abs(
@@ -1387,13 +1390,17 @@ class ReadOnlyPlayerDetector:
                     - np.asarray(self.color_anchor_ref_bgr)
                 ).sum()
             )
-            if _cdist <= self.color_anchor_color_tol * 0.6:
+            if _cdist <= self.color_anchor_color_tol * 0.9:
                 self.color_anchor_ref_bgr = tuple(
                     0.7 * r + 0.3 * b
                     for r, b in zip(self.color_anchor_ref_bgr, best["blue_bgr"])
                 )
-            elif _cdist > self.color_anchor_color_tol * 0.6:
-                # 可疑锁定(色距偏高仍被接受): 打日志便于调参(蓝条颜色/距离)
+                self._ref_warn_at = 0.0  # 重新锁定时刷新告警节流计时
+            elif (_cdist > self.color_anchor_color_tol * 0.9
+                  and (self._ref_warn_at is None
+                       or time.time() - self._ref_warn_at > 2.5)):
+                # 可疑锁定(色距偏高仍被接受): 打日志便于调参, 每2.5s最多一条
+                self._ref_warn_at = time.time()
                 logger.info(
                     f"[color_anchor] 蓝条色距偏高仍锁定: blueBGR="
                     f"({best['blue_bgr'][0]:.0f},{best['blue_bgr'][1]:.0f},"

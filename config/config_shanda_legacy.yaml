@@ -66,6 +66,9 @@ minimap:
   other_player_confirm_frames: 2
   other_player_max_missed_frames: 1
   other_player_match_distance_px: 8.0
+  # 【红点消失自动恢复】: 检测到其他玩家挂机后, 红点消失满此秒数自动恢复巡逻
+  # (用户要求: 消失即恢复, 不用手动按F8; 2s只是跨帧确认, 防红点闪烁反复挂机/恢复)
+  other_player_resume_seconds: 2.0
   player_min_pixels: 4
   player_max_pixels: 80
   region: [0, 0, 285, 245]   # top-left minimap area [x, y, w, h]

@@ -6773,8 +6773,10 @@ def main():
         cv2.setMouseCallback(WINDOW_TITLE, _on_mouse)
 
     _strip_first_seen = None  # 首次检测到红点时间戳
-    _strip_clear_since = None  # 红点消失时间戳(满5分钟自动恢复)
-    OTHER_PLAYER_RESUME_DELAY = 300.0  # 红点消失多久自动恢复挂机(秒=5分钟)
+    _strip_clear_since = None  # 红点消失时间戳(满 other_player_resume_seconds 自动恢复)
+    OTHER_PLAYER_RESUME_DELAY = float(
+        cfg.get("minimap", {}).get("other_player_resume_seconds", 2.0)
+    )  # 红点消失多久自动恢复挂机(用户要求: 消失立即恢复, 2s只是跨帧确认防闪烁)
     # 红点跨帧确认(codex MinimapRedMarkerTracker): 连续 confirm_frames 帧
     # 同一位置出现才认定是真玩家, 滤掉地图地形/UI 的红色误检。
     _red_tracker = MinimapRedMarkerTracker(
@@ -6825,8 +6827,9 @@ def main():
                     logger.warning(f"[采集] 保存失败(不中断): {_ce}")
             # ---- 检测其他玩家: 小地图红点(codex locate_minimap_players) ----
             # 小地图上其他玩家显示为红点, 自己为黄点。红点 >=1 即有人在场:
-            # 暂停挂机(保持喝药, 不攻击/不巡航/不移动), 直到红点消失满
-            # OTHER_PLAYER_RESUME_DELAY(默认300s/5分钟) 自动恢复, 或按 F8 手动恢复。
+            # 暂停挂机(保持喝药, 不攻击/不巡航/不移动); 红点消失满
+            # other_player_resume_seconds(默认2秒) 自动恢复(用户要求:
+            # 检测不到红点就立即恢复, 不用手动按 F8)。
             _minimap_players = locate_minimap_players(frame, minimap_cfg)
             _red_dots = _red_tracker.update(
                 _minimap_players.get("other_players") or [])
@@ -6841,22 +6844,24 @@ def main():
                     logger.warning(
                         f"[其他玩家] 检测到小地图红点 {len(_red_dots)} 个"
                         f"(map_px={[list(p['map_px']) for p in _red_dots]}), "
-                        f"开始挂机(保持喝药, 不攻击/不移动; 红点消失5分钟或按F8恢复)")
+                        f"开始挂机(保持喝药, 不攻击/不移动; 红点消失"
+                        f"{OTHER_PLAYER_RESUME_DELAY:.0f}秒后自动恢复)")
                 if not pause_control.player_pause:
                     pause_control.set_player_pause(True)
                     logger.warning(
                         f"[其他玩家] 检测到 {len(_red_dots)} 个红点, 暂停挂机"
-                        f"(按 F8 立即恢复 / 红点消失 5 分钟后自动恢复)")
+                        f"(红点消失 {OTHER_PLAYER_RESUME_DELAY:.0f} 秒后自动恢复)")
             else:
                 if _strip_first_seen is not None:
-                    # 红点消失: 记录消失时间, 满 5 分钟自动恢复
+                    # 红点消失: 记录消失时间, 满 2 秒自动恢复(跨帧确认防闪烁)
                     if _strip_clear_since is None:
                         _strip_clear_since = now
                     elif (now - _strip_clear_since >= OTHER_PLAYER_RESUME_DELAY
                           and pause_control.player_pause):
                         pause_control.resume_from_player_pause()
                         logger.warning(
-                            f"[其他玩家] 红点消失已满 5 分钟, 自动恢复挂机")
+                            f"[其他玩家] 红点消失已满 {OTHER_PLAYER_RESUME_DELAY:.0f} 秒, "
+                            f"自动恢复挂机")
                     _strip_first_seen = None
                 else:
                     _strip_clear_since = None
