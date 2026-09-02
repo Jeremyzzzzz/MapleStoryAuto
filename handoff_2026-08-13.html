@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MapleStoryAutoLevelUp 交接方案 · 2026-08-13</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    max-width: 980px; margin: 0 auto; padding: 32px 24px 80px;
+    background: #f7f8fa; color: #1f2329; line-height: 1.7;
+  }
+  h1 { font-size: 26px; border-bottom: 3px solid #1a73e8; padding-bottom: 12px; }
+  h2 { font-size: 20px; margin-top: 40px; padding: 8px 12px; background: #eaf1fd; border-left: 4px solid #1a73e8; }
+  h3 { font-size: 16px; margin-top: 26px; color: #1a3d6d; }
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; background: #fff; }
+  th, td { border: 1px solid #dbe0e6; padding: 8px 12px; text-align: left; font-size: 14px; }
+  th { background: #f0f4fa; font-weight: 600; }
+  code { background: #f0f1f3; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+  pre { background: #1f2430; color: #e6e8ee; padding: 14px 16px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.5; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .ok { color: #0a7d33; font-weight: 600; }
+  .bad { color: #c62828; font-weight: 600; }
+  .warn { color: #b26a00; font-weight: 600; }
+  .card { background: #fff; border: 1px solid #e3e8ee; border-radius: 10px; padding: 16px 20px; margin: 14px 0; }
+  .tag { display: inline-block; padding: 1px 10px; border-radius: 12px; font-size: 12px; margin-right: 6px; }
+  .tag.green { background: #e2f5e7; color: #0a7d33; }
+  .tag.red { background: #fde8e8; color: #c62828; }
+  .tag.blue { background: #e3edfd; color: #1a56b3; }
+  .tag.orange { background: #fff3e0; color: #b26a00; }
+  .footer { margin-top: 60px; padding-top: 16px; border-top: 1px solid #dbe0e6; color: #7a828c; font-size: 13px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<h1>MapleStoryAutoLevelUp 交接方案文档</h1>
+<p><span class="tag blue">更新时间 2026-08-13</span><span class="tag green">本机实测</span><span class="tag orange">待验证项已标注</span></p>
+
+<div class="card">
+<b>项目位置：</b><code>C:\Users\Administrator\Documents\ChatGPT\冒险岛\MapleStoryAutoLevelUp</code><br>
+<b>运行环境：</b><code>C:\quant_lab\lstm_gpu_venv\Scripts\python.exe</code>（torch 2.12+cu130 / RTX 5080 / opencv 4.11.0）<br>
+<b>游戏：</b>冒险岛怀旧服 · 角色「麻超圆」（战士） · 配置 <code>shanda_legacy</code><br>
+<b>目标：</b>识别怪物 → 自动寻怪 → 移动到攻击范围 → 自动攻击的闭环挂机
+</div>
+
+<h2>一、已完成内容总览</h2>
+
+<h3>1. 玩家定位（稳定可靠 ✅）</h3>
+<div class="card">
+<table>
+<tr><th>模块</th><th>说明</th><th>状态</th></tr>
+<tr><td>名字框定位</td><td>原版 41×23 名字模板 SQDIFF + 绿幕 mask + 垂直分割 + 上帧局部搜索</td><td class="ok">✅ 稳定</td></tr>
+<tr><td>二级锚点</td><td>勋章（新手冒险家）96×21 模板，名字被特效遮挡时兜底</td><td class="ok">✅ 稳定</td></tr>
+<tr><td>纵向校正</td><td>整体上移 35px（dy=35），让框对准角色本体而非名字</td><td class="ok">✅ 稳定</td></tr>
+<tr><td>按键感知追踪</td><td>记录移动命令 + 速度 130px/s 预测位置，220px 容差防"框瞬移"</td><td class="ok">✅ 稳定</td></tr>
+</table>
+</div>
+
+<h3>2. 战斗逻辑（战士近战 ✅）</h3>
+<div class="card">
+<table>
+<tr><th>特性</th><th>说明</th><th>状态</th></tr>
+<tr><td>近战站桩</td><td>keep_distance ≤ 30 判定为近战，不触发躲避</td><td class="ok">✅</td></tr>
+<tr><td>朝向限制</td><td>攻击/移动更新朝向，目标在背后不算攻击范围</td><td class="ok">✅</td></tr>
+<tr><td>目标锁定</td><td>lock_hold_seconds=3.0，HP 条怪优先，攻击范围内无限保持不换目标</td><td class="ok">✅</td></tr>
+<tr><td>攻击范围</td><td>麻超圆 90×55（水平×垂直），保持距离 20</td><td class="ok">✅</td></tr>
+</table>
+</div>
+
+<h3>3. 怪物检测演进（本次核心工作）</h3>
+<div class="card">
+<p><b>阶段一：YOLO 训练（v3→v5）</b></p>
+<table>
+<tr><th>版本</th><th>数据</th><th>验证 mAP50</th><th>结论</th></tr>
+<tr><td>v3</td><td>用户 9 张截图（增强 8 倍）</td><td>花蘑菇 0.547 / 绿水灵 0.348</td><td class="bad">弱</td></tr>
+<tr><td>v5</td><td>+白底怪图抠图（28 张）</td><td>花蘑菇 0.995 / 绿水灵 0.995</td><td class="warn">数字虚高，实景仍错</td></tr>
+</table>
+<p><b>阶段二：贴图模板匹配（用户主张的方向，已实现）</b></p>
+<table>
+<tr><th>项目</th><th>内容</th><th>状态</th></tr>
+<tr><td>模板库</td><td><code>monster_templates_final/</code>：从 105 张旧实景图 + 标注自动抠取真实游戏 sprite，绿幕化 + 聚类去重</td><td class="ok">✅ 红蜗牛 79 / 蓝蜗牛 62 / 树妖 79</td></tr>
+<tr><td>检测器</td><td><code>tools/sprite_monster_detector.py</code>：两阶段匹配（0.5x 均值填充粗查 → 原图 mask 精查） + 颜色验证</td><td class="ok">✅ 已实现</td></tr>
+<tr><td>自动学习</td><td><code>TemplateCollector</code>：战斗锁定目标时自动抠图入库（去重阈值 0.93）</td><td class="ok">✅ 已实测入库 40 张/类</td></tr>
+<tr><td>主程序集成</td><td><code>--monster-backend sprite</code> + <code>--collect-templates</code> 参数</td><td class="ok">✅ 已集成</td></tr>
+</table>
+</div>
+
+<h3>4. 关键实验结论（数据支撑，别丢）</h3>
+<div class="card">
+<table>
+<tr><th>#</th><th>实验</th><th>结论</th></tr>
+<tr><td>1</td><td>游戏内同类 sprite 互配（不同截图抠出 237 个红蜗牛）</td><td class="ok">互配 CCOEFF 中位数 <b>1.000</b>，94% 配对 >0.8 —— 用户直觉正确：贴图像素级固定</td></tr>
+<tr><td>2</td><td>跨类 sprite 互配（红蜗牛 vs 绿水灵等）</td><td class="ok">仅 0.11–0.65 —— 不同怪完全可分</td></tr>
+<tr><td>3</td><td>白底官方立绘直接匹配游戏画面</td><td class="bad">仅 0.45–0.58，全误报背景 —— 官网立绘 ≠ 游戏内 sprite，此路不通</td></tr>
+<tr><td>4</td><td>YOLO v5 "0.995" 验证分</td><td class="bad">验证集 4 张白底图贡献假分数，实景泛化差 —— 训练数据构成错误</td></tr>
+<tr><td>5</td><td>旧标注数据质量抽查</td><td class="bad">存在标错（blue_snail 框内实为橙色怪）、漏标 —— 评估基准不可靠</td></tr>
+<tr><td>6</td><td>OpenCV 5.0 带 mask matchTemplate</td><td class="bad">连续帧随机崩溃（NaN + C 层 abort），降级 4.11 后仍偶发 → 粗查改用均值填充无 mask</td></tr>
+</table>
+</div>
+
+<h2>二、当前缺陷 / 短板（务必读）</h2>
+
+<div class="card">
+<table>
+<tr><th style="width:24%">短板</th><th>详情</th><th style="width:22%">影响</th></tr>
+<tr><td class="bad">1. 实景识别准确率不足</td><td>用户实测 sprite 后端"检测到的怪物全是错的"。旧图模板对新图（射手训练场III）的怪误报多；检测框经常套在背景上</td><td>挂机不可用（当前优先级最高）</td></tr>
+<tr><td class="bad">2. 新图 4 怪模板缺失</td><td>花蘑菇/绿水灵/绿蘑菇无实景模板，红蜗牛模板来自旧图，与训练场III 的渲染有差异</td><td>认不出新怪 → 需要录制采集</td></tr>
+<tr><td class="bad">3. 检测速度慢</td><td>全图 1.7s/帧，玩家 ROI 1.1s/帧（异步线程跑，主循环不阻塞，但怪移动后位置过期，靠 3s sticky 兜底）</td><td>战斗响应滞后</td></tr>
+<tr><td class="warn">4. 旧标注质量差</td><td>map_three_class_v1 标注存在标错/漏标，导致评估指标失真，模板库也继承了错误</td><td>评估不可信</td></tr>
+<tr><td class="warn">5. 地图 OCR 识别错误</td><td>"射手训练场III" 被 OCR 成 "射手训练场川"，无匹配路线 → 只能巡逻模式</td><td>无法路线寻路</td></tr>
+<tr><td class="warn">6. YOLO 数据构成缺陷</td><td>训练集 157 张 = 105 旧实景 + 28 白底 + 24 用户截图，实景样本不足且与目标图不同</td><td>YOLO 实景基本不可用</td></tr>
+<tr><td class="warn">7. 模板采集依赖战斗锁定</td><td>TemplateCollector 依赖"锁定目标"信号，而锁定本身依赖错误检测 → 采集到的模板也可能错</td><td>自动学习可能学错</td></tr>
+<tr><td class="warn">8. OpenCV 版本敏感</td><td>已降级 4.11；mask 匹配在大量连续调用下仍有崩溃风险（已用均值填充绕开粗查）</td><td>长时间运行稳定性待验证</td></tr>
+</table>
+</div>
+
+<h2>三、已确认的技术事实（后续方案的地基）</h2>
+<div class="card">
+<ol>
+<li><b>游戏内怪物 sprite 是像素级固定的</b> —— 同一种怪在不同画面里就是同一张贴图（互配中位数 1.0）</li>
+<li><b>但"游戏内渲染"≠"官网立绘"</b> —— 白底素材匹配不了实景（0.45–0.58）</li>
+<li><b>模板必须来自真实游戏画面</b>，且需要多种姿态（缩壳/伸壳、左右朝向）、多种尺度</li>
+<li><b>旧标注数据不可全信</b> —— 标错、漏标普遍，只能当参考</li>
+<li><b>"攻击瞬间的目标 = 怪物"是最可靠的标注信号</b>（用户提出，尚未实现）</li>
+</ol>
+</div>
+
+<h2>四、下一步方案：录制打怪流程（用户提出，待实现）</h2>
+<div class="card">
+<p><b>核心思想：</b>用户手动打怪时，<b>每次按下攻击键的瞬间，角色正前方攻击范围内的目标就是怪物</b>——这个信号比任何自动检测都可靠。录制器要做的事：</p>
+<table>
+<tr><th>录制项</th><th>方案</th></tr>
+<tr><td>怪物模板</td><td>监听攻击键（d）→ 按下瞬间截图 → 定位玩家 + 朝向 → 在正前方攻击范围内（左/右各搜，取近侧）找目标 → 主色抠图 → 绿幕化入库</td></tr>
+<tr><td>行走路线</td><td>录制期间持续记录玩家坐标序列（含跳跃/爬绳标记）→ 存为路线文件，之后自动寻路</td></tr>
+<tr><td>朝向判定</td><td>监听左/右方向键 + 攻击时目标相对玩家方位双信号互证</td></tr>
+<tr><td>去重</td><td>与已有模板 CCOEFF ≥ 0.93 跳过（复用现有 TemplateCollector 逻辑）</td></tr>
+</table>
+<p><b>落地建议：</b>新增 <code>tools/record_combat.py</code> 录制模式（复用 GameWindowCapturor / PlayerLocator / 主色抠图），录完产出模板库 + 路线 JSON；之后 sprite 后端加载录制模板即可精准识别。</p>
+<p><b>预期效果：</b>录制 5-10 分钟即可覆盖射手训练场III 全部怪种 + 常用路线，解决缺陷 #1/#2/#7。</p>
+</div>
+
+<h2>五、启动方式（当前状态）</h2>
+<div class="card">
+<p><b>实景挂机（sprite 后端 + 自动学习）：</b></p>
+<pre><code>C:\quant_lab\lstm_gpu_venv\Scripts\python.exe tools/auto_combat.py --cfg shanda_legacy --player-name 麻超圆 --monster-backend sprite --collect-templates --show-viz</code></pre>
+<p><b>快捷键：</b>F8 = 暂停/继续，F9 = 完全退出</p>
+<p><b>有限帧冒烟测试（已通过）：</b></p>
+<pre><code>C:\quant_lab\lstm_gpu_venv\Scripts\python.exe tools/auto_combat.py --cfg shanda_legacy --player-name 麻超圆 --monster-backend sprite --dry-run --max-frames 5 --headless</code></pre>
+</div>
+
+<h2>六、关键文件索引</h2>
+<div class="card">
+<table>
+<tr><th>路径</th><th>说明</th></tr>
+<tr><td><code>tools/auto_combat.py</code></td><td>主挂机程序：玩家定位、战斗策略、检测接线（152KB）</td></tr>
+<tr><td><code>tools/sprite_monster_detector.py</code></td><td>sprite 贴图检测器（v8）+ SpriteMonsterDetector 包装 + TemplateCollector 自动采集</td></tr>
+<tr><td><code>tools/live_perception_viewer.py</code></td><td>实时感知查看器（AdvisoryEvaluator 目标锁定、YOLO 检测）</td></tr>
+<tr><td><code>monster_templates_final/</code></td><td>真实游戏 sprite 模板库（red_snail 79 / blue_snail 62 / stump 79）</td></tr>
+<tr><td><code>training_data/maple_six_class_v5/</code></td><td>YOLO 6 类训练数据（缺陷：白底图为主）</td></tr>
+<tr><td><code>training_runs/maple_six_class_v5/weights/best.pt</code></td><td>YOLO 模型（v5，实景表现差）</td></tr>
+<tr><td><code>probe_output/_test_*.py</code></td><td>本次全部实验脚本（贴图可行性/多尺度/崩溃定位等）</td></tr>
+<tr><td><code>PROJECT_HANDOFF.md</code></td><td>8-11 旧交接文档（本文件为更新版）</td></tr>
+</table>
+</div>
+
+<h2>七、交接验收清单</h2>
+<div class="card">
+<ul>
+<li>✅ 玩家定位稳定（名字框 + 勋章 + 按键预测，框不瞬移）</li>
+<li>✅ 战士近战逻辑（站桩不躲避、朝向限制、目标锁定）</li>
+<li>✅ sprite 检测器可运行、自动学习可入库</li>
+<li>✅ 冒烟测试通过（dry-run 5 帧无崩溃）</li>
+<li>❌ 实景识别准确率（用户实测：检测全错 → <b>待录制方案解决</b>）</li>
+<li>❌ 新图 4 怪模板（待录制）</li>
+<li>❌ 路线录制/寻路（待实现）</li>
+<li>❌ 地图 OCR "射手训练场川" 识别修正（待办）</li>
+</ul>
+</div>
+
+<div class="footer">
+本交接文档由 WorkBuddy 于 2026-08-13 生成 · 覆盖 8-11 交接后的全部进展（玩家定位、战斗逻辑、怪物检测重构、sprite 模板方案）
+</div>
+
+</body>
+</html>

@@ -1,0 +1,16 @@
+aoe_skill:
+  range_x: 350
+bot:
+  attack: aoe_skill
+  map: first_barrack
+buff_skill:
+  cooldown:
+  - 200
+  keys:
+  - g
+health_monitor:
+  add_hp_percent: 70
+  force_heal: true
+key:
+  add_hp: q
+  aoe_skill: r

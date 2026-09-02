@@ -1,0 +1,26 @@
+@echo off
+title 冒险岛自动打猪 - 纯点位巡航模式 (v10)
+cd /d "%~dp0"
+echo ============================================
+echo   冒险岛自动打猪 v10 (回退稳定版: 纯点位巡航 + 顺路打怪)
+echo   玩家定位: color_anchor 色块锚点 (no-ocr)
+echo   怪物检测: YOLO 野猪 + 树妖(木妖) 双模型
+echo   其他玩家: 小地图红点检测 (R1/R2, 检测到即挂机)
+echo   热键: F1 开始录制 / F2 打普通点 / F3 打跳跃点
+echo         F6=点位置定位 F10=恢复上个点位
+echo         F4 保存并开始巡航 / F5 清空录制 / F8 暂停恢复
+echo   使用前请先点游戏窗口聚焦, 日志会显示 游戏聚焦=Y
+echo ============================================
+echo 启动中... (关闭本窗口即停止脚本)
+echo.
+echo [1/2] 检查并清理残留进程/锁...
+taskkill /F /FI "WINDOWTITLE eq 冒险岛自动打猪*" >nul 2>&1
+taskkill /F /IM python.exe /FI "WINDOWTITLE eq *auto_combat*" >nul 2>&1
+del /Q "%TEMP%\auto_combat_ms.lock" >nul 2>&1
+echo [2/2] 启动 bot...
+set "PY=C:\quant_lab\lstm_gpu_venv\Scripts\python.exe"
+if not exist "%PY%" set "PY=python"
+"%PY%" tools\auto_combat.py --cfg shanda_legacy --monster-backend yolo --yolo-model training_runs\wild_boar_real_hardneg_v4_960\weights\best.pt --yolo-confidence 0.07 --yolo-iou 0.70 --yolo-image-size 960 --no-color-verify --show-viz --no-ocr --no-capture --player-name 麻超圆 --fps-limit 12 --monster-labels wild_boar --no-terrain --mode minimap_patrol --map-name "野猪的领土！！"
+echo.
+echo 脚本已退出, 按任意键关闭窗口
+pause >nul

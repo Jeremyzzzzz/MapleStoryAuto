@@ -1,0 +1,262 @@
+bot:
+  mode: "aux"
+  attack: "directional"
+
+key:
+  directional_attack: "d"
+  add_hp: "a"
+  add_mp: "f"
+  jump: "space"
+  up: "up"
+  down: "down"
+  pickup: "z"
+  feed: "n"   # 喂宠物键(每30分钟按一次)
+
+health_monitor:
+  enable: False
+  force_heal: False
+  add_hp_percent: 20
+  add_mp_percent: 20
+  add_hp_cooldown: 3.0
+  add_mp_cooldown: 3.0
+  return_home_if_no_potion: False
+  input_full_frame: True
+  bar_reference_size: [1278, 750]
+  bar_regions:
+    hp: [471, 731, 98, 13]
+    mp: [572, 731, 98, 13]
+    exp: [677, 731, 108, 13]
+  bar_hsv_ranges:
+    hp: [[0, 120, 120], [10, 255, 255]]
+    mp: [[95, 100, 100], [135, 255, 255]]
+    exp: [[18, 100, 100], [40, 255, 255]]
+  bar_min_column_fraction: 0.25
+  # HP/MP 具体数字 OCR 识别区域(参考宽1278坐标): 识别 "HP[当前/总]" / "MP[当前/总]"
+  hp_ocr_region: [466, 725, 85, 18]
+  mp_ocr_region: [568, 725, 85, 18]
+  # EXP 当前经验值数字 OCR 区域(参考宽1278坐标): 识别 "EXP 324625[90.95%]" 的数字 324625
+  exp_ocr_region: [660, 725, 75, 18]
+  hp_ocr_submit_interval: 0.12   # OCR 识别最小间隔(秒, 越小反击越灵敏)
+
+minimap:
+  player_color: [0, 255, 255]
+  player_color_tolerance: [160, 75, 75]
+  canvas_region: [23, 117, 125, 137] # calibrated map canvas [x, y, w, h]
+  canvas_reference_width: 1370
+  canvas_auto_width: true             # expand to the current minimap panel's right border
+  marker_color_tolerance: [40, 40, 40]
+  marker_min_pixels: 3
+  marker_max_pixels: 24
+  marker_max_dimension: 10
+  marker_min_fill_ratio: 0.25
+  # Other players are shown as compact red dots in the minimap. Keep their
+  # thresholds separate from the yellow self-marker so tuning one cannot
+  # change the existing player coordinate.
+  other_player_color: [0, 0, 255]
+  other_player_hsv_ranges: [[0, 170, 175, 12, 255, 255], [170, 170, 175, 179, 255, 255]]
+  other_player_red_min: 175
+  other_player_red_green_gap: 120
+  other_player_red_blue_gap: 120
+  other_player_marker_min_pixels: 6
+  other_player_marker_max_pixels: 30
+  other_player_marker_min_dimension: 2
+  other_player_marker_max_dimension: 8
+  other_player_marker_min_fill_ratio: 0.35
+  other_player_marker_min_core_pixels: 2
+  other_player_confirm_frames: 2
+  other_player_max_missed_frames: 1
+  other_player_match_distance_px: 8.0
+  player_min_pixels: 4
+  player_max_pixels: 80
+  region: [0, 0, 285, 245]   # top-left minimap area [x, y, w, h]
+  ocr_region: [0, 0, 285, 245] # wider crop covering the map title text above minimap
+  lookahead_px: 12           # how far ahead to sample terrain on the minimap
+  step_px: 6                 # first terrain sample distance from the player marker
+patrol_minimap:
+  right_norm: 0.82   # 小地图 map_norm_x>此值(玩家接近地图右端) → 巡逻往左走
+  left_norm: 0.18    # 小地图 map_norm_x<此值(玩家接近地图左端) → 巡逻往右走
+
+# 小地图坐标航点巡逻(精确控制角色路线, 适合大量跳跃/爬绳点的地图)
+# 录制: 段式关键点——起点自动记; 跳跃(space)按下瞬间记/升级 Jump 点;
+#       按住 up/down 爬绳期间定格终点, 松手记 climb 点; 松手(停止按键)记 move 点。
+# 回放: 逐点达成制——必须【到达】当前记忆点才推进下一个, 未达成持续重试;
+#       几何判断: 同层左右走 / 正上方跳 / 斜上方左跳右跳 / climb_up 跳+爬 / climb_down 下滑。
+minimap_waypoint:
+  min_spacing: 0.02      # 录制去抖: 相邻记忆点最小间距(map_norm 单位)
+  arrive_x: 0.00005      # 普通点到达水平阈值: 至少小数点后4位一致(0.00005≈四舍五入4位后相等)
+  arrive_y: 0.00005      # 普通点到达垂直阈值: 同上, 必须完全碰到点位才算
+  move_arrive_tol: 0.01  # 【普通点位(move)到达放宽】: 接近即到达(0.01≈1px小地图); 跳跃点位仍精确对齐
+  jump_x_gap: 0.04       # 判定"正上方"的 x 差阈值(map_norm, Δx>此值视为斜上方)
+  action_hold: 0.35      # 跳跃动作保持时间(秒), 避免连跳
+  climb_timeout: 8.0     # 爬绳卡住判定: 持续爬多少秒 y 无变化视为失败并重新起跳
+  retry_max: 20          # 每个记忆点最大重试次数(超过则警告并跳过, 避免永久卡死)
+  retry_timeout: 40.0    # 每个记忆点最大尝试时长(秒, 超过则警告并跳过)
+  jump_align_x: 0.003    # 跳跃点起跳对齐容差(用户要求误差<=0.003否则拿不到绳子): 严格对齐, 偏差>此值一律重新走位
+  climb_jump_dy: 0.05    # 跳跃点起跳判定: 下一目标Y差>=此值->跳+按上爬绳; <此值->跳台阶(按X方向); <=-此值->跳下
+  step_arrive_x: 0.02    # 跳台阶落点到达水平容差(跳跃物理落点有偏差, 收紧后由下一普通点精确修正)
+  step_arrive_y: 0.02    # 跳台阶落点到达垂直容差(同上)
+  jump_climb_align_x: 0.03  # 抓绳跳(jump_climb)对齐容差: 按着上跳过去能抓绳, 不必精确到点
+  jump_arrive_x: 0.05    # 跳跃落点判定水平容差(放宽: 跳到平台附近即成功, 跳跃有自然偏差)
+  jump_arrive_y: 0.09    # 跳跃落点判定垂直容差(放宽: 跳上去了差一点不算失误, 防死循环)
+  retry_max: 6           # 跳跃失败先重试当前段次数, 超限才从头开始(防一次没跳好就从头)
+  step_hold_seconds: 0.06 # 近距离微调步进: 按方向键时长(约1px小地图/步)——0.03s太短游戏不响应会卡死, 保持0.06能正常走位
+  max_waypoints: 3000    # 航点上限(防止录制文件过大)
+  rest_every_rounds: 5   # 每巡航N圈回初始点(第一个点)坐椅子休息, 回满状态再继续
+  rest_sit_key: "x"      # 坐椅子按键(冒险岛默认 x)
+  rest_hold_seconds: 0.5 # 坐椅子按键时长(秒)
+  rest_sit_delay: 3.0    # 到达初始点后等待秒数再按X坐椅子(刚停稳按坐不上)
+  recover_y_tol: 0.03    # 跳台阶失败恢复: 同平台Y容差(norm抖动±0.016, 平台间差>0.05), 只找同平台点避免死循环跳
+
+nametag:
+  enable: True
+  name: "shanda_legacy_player"
+  mode: "grayscale"
+  offset: [0, 30]
+  diff_thres: 0.25
+  global_diff_thres: 0.35
+  split_width: 41
+
+ui_coords:
+  ui_y_start: 735
+  reference_width: 1370  # scale the gameplay cutoff upward for larger captures
+
+game_window:
+  title: "冒险岛怀旧服"
+  size: [750, 1278]
+  title_bar_height: 31
+
+system:
+  client_profile: "shanda_legacy"
+
+perception_overlay:
+  fps_limit: 6
+  player_match_threshold: 0.30       # full nametag template proposal threshold
+  player_identity_threshold: 0.48    # combined background + name-glyph identity
+  player_local_identity_threshold: 0.50 # 提高: 回退模板匹配时不接受低分背景/宠物(探测背景元素identity 0.44~0.54)
+  player_identity_margin: 0.015      # reject ambiguous global reacquisition
+  player_glyph_threshold: 130        # grayscale split for the name glyphs
+  player_glyph_weight: 0.70
+  player_candidate_count: 16
+  player_lock_radius: 300        # 放大: 跳跃/高处下落时名字框单帧位移可达 200px+, 半径 80 会直接跟丢; 300 覆盖大幅位移(宠物的 identity 分低仍会被过滤)
+  player_reacquire_misses: 15      # 缩小: 60帧(≈5秒)太久, 跳跃/下落短暂失败后快速解锁全局搜索重新锁定; 15帧(≈1.2秒)即重搜
+  player_center_weight: 0.12
+  player_ocr_confidence: 0.70
+  player_ocr_submit_interval: 0.50
+  player_ocr_refresh_interval: 1.0   # 加快: OCR每秒重新确认"麻超圆"位置, 及时纠正漂移
+  player_ocr_threads: 1        # OCR线程数(1足够; 2 会双核占用过高——历史 --no-ocr 的原因)
+  player_title_anchor: "中级冒险家勋章" # exact OCR badge used when the short name is obscured
+  player_box_size: [70, 90]
+  player_max_valid_x: 1278  # 放宽到画面全宽: 830 会把右侧 x>830 的玩家候选全排除(玩家从高处跳下可能落点 x>830), 导致全局搜索找不到玩家卡死; 地图蘑菇误检靠 identity 分(0.50)过滤, 不再靠 x 一刀切
+  player_max_valid_y: 620   # 排除底部聊天/经验/快捷栏文字产生的名字框相关峰值
+  player_glyph_min_columns: 2 # 至少两个字形列支持，避免单字 UI 文本伪装成角色名
+  player_color_anchor_enabled: true # no-ocr 优先用蓝色称号条定位角色
+  player_color_anchor_name_offset_y: 24 # 称号条顶部到名字框顶部的像素偏移
+  player_color_anchor_min_red_fraction: 0.02 # 称号推导位置附近必须有少量红色角色特征
+  player_color_anchor_local_radius: 260 # 跳跃/遮挡时只在上一帧预测位置附近重捕获称号
+  monster_refresh_frames: 2
+  stump_template: "monster/black_axe_stump/black_axe_stump_1.png"
+  stump_scale: 0.85
+  stump_match_threshold: 0.865
+  max_monsters: 30
+
+combat_advisory:
+  attack_horizontal_px: 135
+  attack_vertical_px: 70
+  dodge_horizontal_px: 90
+  dodge_vertical_px: 60
+  immediate_danger_px: 42
+  approach_speed_px_s: 18
+  track_match_px: 100
+
+# Auto combat loop (tools/auto_combat.py) tuning.
+auto_combat:
+  attack_cooldown_min: 0.05     # seconds between attacks (randomized lower bound)
+  attack_cooldown_max: 0.10     # seconds between attacks (randomized upper bound)
+  attack_hold_seconds: 0.05     # hold duration for attack key press
+  turn_hold_seconds: 0.08      # 攻击前转向按键时长: 15ms 太短游戏来不及转身就攻击(朝无怪方向空耗蓝); 80ms 足够转身又不至于走一步
+  turn_pause_seconds: 0.05     # 转向后攻击前的停顿(确保转身生效)
+  attack_min_player_confidence: 0.9 # 玩家置信度门槛: 跳跃时玩家框飘偏(置信约0.55)不触发攻击防掉格; <此值不攻击(受伤反击不受限)
+  patrol_hunt_range_px: 300   # 巡游打怪绿色范围: 玩家为中心左右各此值, 范围内有怪则离开航点追怪消灭, 无怪才继续走点位
+  hunt_dir_lock_seconds: 0.8  # 巡游打怪方向防抖: 选定追怪方向后锁定此秒数, 防怪框左右抖动导致角色来回走
+  hunt_hold_seconds: 3.0      # 巡游打怪目标跟踪: 怪漏检后按最后位置继续追击此秒数(防漏检→回点位→又检测到来回走)
+  hunt_confirm_frames: 3      # 巡游打怪新策略: 未追怪时怪需连续此帧数出现在绿框才追(单帧误检不打断巡航, 防来回走)
+  player_yolo_model: "training_runs/player_yolo_v1/weights/best.pt"  # 玩家YOLO检测模型(第一优先级, 漏检回退color_anchor)
+  player_yolo_confidence: 0.30  # 玩家YOLO置信度门槛(低=召回优先; 实测mAP50=0.96)
+  player_yolo_image_size: 640   # 玩家YOLO输入尺寸
+  dodge_hold_seconds: 0.15      # step-away duration
+  move_hold_seconds: 0.12       # walk burst duration while approaching
+  patrol_enabled: true          # wander when no target is visible
+  patrol_min_seconds: 1.5       # min walking time before changing patrol direction
+  patrol_max_seconds: 4.0       # max walking time before changing patrol direction
+  attack_retry_limit: 4         # give up a target after this many attacks without a kill
+  attack_ignore_seconds: 2.0    # how long to ignore a target that never dies (drops/background)
+  player_refresh_frames: 3      # run OCR player-locate only every N frames
+  player_sticky_seconds: 1.5    # reuse last known player position for this long
+  ocr_max_age: 8.0              # OCR 结果有效期(秒);OCR推理约2-9秒一次,结果需覆盖到下一次刷新
+  monster_max_age: 2.0          # max age (s) of async YOLO results before considered stale
+  monster_min_interval: 0.08    # min seconds between async YOLO inferences (YOLO仅14ms, 0.08≈12fps匹配codex, 否则跟踪不准)
+  yolo_confidence: 0.07         # YOLO conf threshold (2026-08-30 降低: 0.10 野猪漏检, 帧间不稳定; 更低召回优先)
+  # 树妖(木妖/stump)并行检测: 第二 YOLO 模型(与野猪模型同时跑, 结果合并)
+  stump_model: "training_runs/warrior_stump_hardneg_v2_1280/weights/best.pt"
+  stump_confidence: 0.55        # 树妖 conf(2026-09-01 回调: 0.65 漏检多导致来回走, 0.55 召回优先)
+  stump_iou: 0.45               # 树妖 NMS iou
+  stump_image_size: 1280        # 树妖输入尺寸
+  stump_track_max_missed: 2     # 树妖跟踪: 允许丢失帧数(08-30放宽: 漏检帧多, 1帧太严导致这帧有下帧无, 角色来回走)
+  stump_track_min_hits: 1       # 树妖跟踪: 确认帧数(09-01放宽: 2帧确认慢, 1帧尽快见到就锁定, 减少帧间跳变)
+  stump_track_high_confidence: 0.70
+  name_bottom_offset: 30        # px below the name box where the body center is
+  sprite_threshold_fine: 0.68   # sprite: fine-stage CCOEFF threshold
+  sprite_threshold_coarse: 0.66 # sprite: coarse-stage CCOEFF threshold
+  sprite_level_band_half_h: 110 # sprite: 只搜玩家中心上下 ±band px 的水平带(排除上下层误检)
+  sprite_level_tol_px: 45       # sprite: 怪物脚底与玩家脚底 y 差 ≤ tol 才保留(同层判定)
+  player_box_shift_up_px: 65    # 玩家视觉框整体上移(脚底贴地);加大则框更靠上(45->65 用户要求再上移20px)
+  tag_threshold: 0.3            # 角色sprite匹配置信度阈值(CCOEFF);0.6太高框不到玩家, 用户要求降到0.3
+
+# ======================================================================
+# 角色档案 (多角色支持):按 --player-name 自动匹配。
+# 每个角色可独立配置 按键绑定(key) 和 攻击距离(attack);
+# 缺省项回落到顶层 key 段 / default。换号只需换 --player-name,
+# 同一个脚本兼容所有角色(法师远攻 / 战士近战 / 新角色加一段即可)。
+# ======================================================================
+character_profiles:
+  default:
+    attack:
+      horizontal: 135
+      vertical: 70
+      keep_distance: 60
+  超团甜:   # 法师:魔法双击,远程
+    key:
+      directional_attack: "d"
+      add_hp: "a"
+      add_mp: "f"
+      jump: "space"
+    attack:
+      horizontal: 260
+      vertical: 70
+      keep_distance: 80
+  麻超圆:   # 战士:近战,攻击距离小
+    key:
+      directional_attack: "d"
+      add_hp: "c"
+      add_mp: "v"
+      jump: "space"
+    attack:
+      horizontal: 100
+      vertical: 60
+      keep_distance: 20
+
+# attack_profiles 由 character_profiles 自动生成(仅读,勿手动改)。
+# 保留它是为了兼容旧代码里直接读 cfg["attack_profiles"] 的路径。
+attack_profiles:
+  default:
+    horizontal: 135
+    vertical: 70
+    keep_distance: 60
+  超团甜:
+    horizontal: 260
+    vertical: 70
+    keep_distance: 80
+  麻超圆:
+    horizontal: 100
+    vertical: 60
+    keep_distance: 20

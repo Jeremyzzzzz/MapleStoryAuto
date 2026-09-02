@@ -1,0 +1,38 @@
+build/
+screenshot/
+video/
+dist/
+test/
+*__pycache__/
+*.log
+*.DS_Store
+*.prof
+*.config_tmp.yaml
+*config_custom.yaml
+*.exe
+*.spec
+*.part
+*.lnk
+
+# 大体积/运行时产物, 不进版本库
+.yolo_runtime/
+training_data/
+yolo26n.pt
+runs/
+# 训练输出全部忽略; 仅 wild_boar_real_hardneg_v4_960/weights/best.pt 用 git add -f 强制入库(运行时必需)
+training_runs/
+downloads/
+probe_output/
+log/
+
+# 运行时调试产物(根目录)
+/*.png
+hf_api_probe.json
+
+# 小地图目录: 只保留 waypoints.json / map.png, 忽略历史存档
+minimaps/*/routes/
+
+# 历史模板仓库(已不用于当前 YOLO 后端)
+monster_templates/
+
+# nametag 模板是运行时资源, 全部保留

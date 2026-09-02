@@ -1,0 +1,79 @@
+# Translation from English to Chinese
+eng_to_cn:
+  # map
+  ant_cave_2: 螞蟻洞2
+  cloud_balcony: 雲彩露臺
+  dragon_territory: 魔龍領地
+  empty_house: 空屋
+  fire_land_1: 火焰之地1
+  fire_land_2: 火焰之地2
+  first_barrack: 第一軍營
+  land_of_wild_boar: 黑肥肥領土
+  lost_time_1: 遺失的時間1
+  monkey_swamp_3: 猴子沼澤地3
+  mushroom_hills: 菇菇山丘
+  north_forest_training_ground_2: 北部森林訓練場2
+  north_forest_training_ground_8: 北部森林訓練場8
+  pig_shores: 肥肥海岸
+  the_path_of_time_1_for_mage: 時間之路1(需瞬移)
+  garden_of_green_2: 藍光庭園2
+  garden_of_red_2: 紅光庭園2
+  foggy_forest_for_mage: 濃霧森林(需瞬移)
+  101_2f_east: 時尚大道西部區域
+  black_mountain: 烏山深處
+  disposed_flower_garden: 暗影花園
+  mu_Lung_wild_bear_area_2: 野熊的領土2
+  # monster
+  zombie_lupin: 天使猴
+  black_axe_stump: 黑斧木妖
+  brown_windup_bear: 褐色發條熊
+  cold_eye: 冰獨眼獸
+  evolved_ghost: 進化妖魔
+  fire_boar: 火肥肥
+  green_mushroom: 綠菇菇
+  mushroom: 菇菇寶貝
+  pig: 肥肥
+  pink_windup_bear: 粉色發條熊
+  ribbon_pig: 緞帶肥肥
+  skeleton_officer: 骷髏隊長
+  skeleton_soldier: 骷髏士兵
+  spike_mushroom: 刺菇菇
+  wild_boar: 黑肥肥
+  wild_kargo: 魔龍
+  wind_single_eye_beast: 風獨眼獸
+  zombie_mushroom: 殭屍菇菇
+  grupin: 藍獨角獅
+  red_cellion: 紅獨角獅
+  the_book_ghost: 書靈
+  blue_perfume: 冷豔香水
+  grizzly: 功夫熊
+  panda: 柔道貓熊
+  hodori: 小虎
+  moon_bunny: 月妙
+  nependeath: 食人花
+  dark_nependeath: 黑食人花
+
+# Register mobs in each maps
+map_mobs_mapping:
+  ant_cave_2: [spike_mushroom, zombie_mushroom]
+  cloud_balcony: [pink_windup_bear, brown_windup_bear]
+  dragon_territory: [wild_kargo]
+  empty_house: [mushroom]
+  fire_land_1: [black_axe_stump, fire_boar]
+  fire_land_2: [black_axe_stump, fire_boar]
+  first_barrack: [skeleton_officer, skeleton_soldier]
+  land_of_wild_boar: [wild_boar]
+  lost_time_1: [evolved_ghost]
+  monkey_swamp_3: [zombie_lupin]
+  mushroom_hills: [mushroom, green_mushroom]
+  north_forest_training_ground_2: [green_mushroom, spike_mushroom]
+  north_forest_training_ground_8: [wind_single_eye_beast]
+  pig_shores: [pig, ribbon_pig]
+  the_path_of_time_1_for_mage: [evolved_ghost]
+  garden_of_green_2: [grupin]
+  garden_of_red_2: [red_cellion]
+  foggy_forest_for_mage: [the_book_ghost]
+  101_2f_east: [blue_perfume]
+  black_mountain: [hodori, moon_bunny, black_axe_stump]
+  disposed_flower_garden: [nependeath, dark_nependeath]
+  mu_Lung_wild_bear_area_2: [grizzly, panda]

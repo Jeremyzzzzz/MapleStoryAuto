@@ -1,0 +1,36 @@
+# ====== macOS Configuration ======
+# The following configuration is only for macOS
+
+game_window:
+  size: [691, 1280]
+  title_bar_height: 85         # 📐 Title Bar Height (Note titel bar will be cropped before window resize)
+
+monster_detect:
+  hp_bar_color: [90, 201, 108] # (B,G,R)
+
+minimap:
+  player_color: [84, 255, 255] # BGR
+  other_player_color: [20, 15, 228] # BGR
+  debug_window_upscale: 2
+
+party_red_bar:
+  lower_red: [4, 80, 50] # ❤️ HSV, darker red of party health bar
+  upper_red: [5, 90, 90] # ❤️ HSV, brighter red of party health bar
+
+rune_solver:
+  arrow_highlight_low_hsv: [340, 50, 85]    # 🔴
+  arrow_highlight_high_hsv: [110, 100, 100] # 🔴
+
+# More tolerant for macOS
+# TODO: it's not ideal but a easy workaround
+rune_warning_cn:
+  diff_thres: 0.15
+
+rune_warning_eng:
+  diff_thres: 0.15
+
+rune_enable_msg_cn:
+  diff_thres: 0.15
+
+rune_enable_msg_eng:
+  diff_thres: 0.15
