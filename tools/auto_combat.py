@@ -641,7 +641,11 @@ class CombatPolicy:
         # 【扣血反击已禁用】(2026-08-30): 用户要求先禁用"人物扣血反击"——
         # HP 掉血不再触发反击, 只保留方向突变(knocked_back)反击(且有玩家
         # 置信度门槛兜底)。hp_dropped 计算保留但不再作为触发条件。
-        if knocked_back and now - self._last_counter_at >= 0.15:
+        # 【安全点/恢复路线行程中禁反击】: 走路期间被怪撞也不反击(反击会
+        # 转向/位移, 打断行程导致走不到安全点/恢复点)。
+        if (knocked_back
+                and not (self._safe_active or self._recall_active)
+                and now - self._last_counter_at >= 0.15):
             # 反击(所有模式含纯点位巡航): 被怪打/击退立即反击(现仅方向突变触发)。
             # 方向优化: 优先用【当前可见怪物位置】(advisory target_box);
             # 若 target_box 过期/丢失(异步延迟), 用缓存的最近目标方向;
@@ -5117,7 +5121,7 @@ class PauseController:
                 elif name == self.quit_key:
                     self.request_quit()
                     print("[hotkey] quit requested", flush=True)
-                elif name in ("f1", "f2", "f3", "f4", "f6", "f10", "f11", "f12"):
+                elif name in ("f1", "f2", "f3", "f4", "f6", "f10", "f11"):
                     with self._lock:
                         self.fn_events.append(name)
                 else:
@@ -7505,22 +7509,6 @@ def main():
                         logger.info(
                             "[热键] F11 开始录制恢复路线(从跌落/商城出口位置开始, "
                             "走回巡游线): F2 普通点 / F3 跳跃点, 走到巡游线上再按 F11 保存")
-                elif fn == "f12":
-                    # F12: 恢复上个加载的点位(补救误按 F1)-> 丢弃当前内存点
-                    # (可能被 F1 清空), 从磁盘 waypoints.json 重新加载并恢复巡航。
-                    recorder.is_recording = False
-                    waypoint_patrol.is_recording = False
-                    _reloaded = waypoint_patrol.load_waypoints(active_map_name)
-                    if _reloaded:
-                        waypoint_patrol.idx = 0
-                        waypoint_patrol.start_patrol()
-                        logger.info(
-                            f"[热键] F12 已恢复上次加载的点位: "
-                            f"{len(waypoint_patrol.waypoints)} 个航点, 恢复巡航")
-                    else:
-                        logger.warning(
-                            "[热键] F12 恢复失败: 磁盘上没有可用航点"
-                            "(请先 F4 保存过路线, 或重新 F1-F3 录制)")
                 elif fn == "f7":
                     # F7: 仅保存航点到磁盘(方便下次直接 F3 加载, 不启动巡航)
                     if waypoint_patrol.save(active_map_name):
@@ -7725,12 +7713,37 @@ def main():
                     # 顶部醒目显示录制/巡航状态(F1~F4 热键反馈)
                     _wp_hud = getattr(policy, "_waypoint_patrol", None)
                     if _wp_hud is not None:
+                        # 【录制可视化】: 显示正在录什么点位 + 数量 + 最近一点,
+                        # 并把已录的点画在小地图上(蓝=主航线, 橙=安全点, 粉=恢复路线)
+                        _rec_list = None
+                        _rec_color = None
                         if _wp_hud.is_recording:
-                            _hud_txt, _hud_col = "● 录制中 (手动走路线, F2 结束)", (80, 255, 120)
+                            _n = len(waypoint_patrol.waypoints)
+                            _last = waypoint_patrol.waypoints[-1] if _n else None
+                            _ls = (f" 最近({float(_last['nx']):.3f},{float(_last['ny']):.3f})"
+                                   if _last else "")
+                            _hud_txt, _hud_col = (
+                                f"● 录制:主航线 已{_n}点{_ls} (F2普通/F3跳跃/F4保存)",
+                                (80, 255, 120))
+                            _rec_list, _rec_color = waypoint_patrol.waypoints, (0, 255, 255)
                         elif _wp_hud.is_recording_safe:
-                            _hud_txt, _hud_col = "● 安全点录制中 (F2/F3打点, F10保存)", (255, 160, 0)
+                            _n = len(waypoint_patrol.safe_points)
+                            _last = waypoint_patrol.safe_points[-1] if _n else None
+                            _ls = (f" 最近({float(_last['nx']):.3f},{float(_last['ny']):.3f})"
+                                   if _last else "")
+                            _hud_txt, _hud_col = (
+                                f"● 录制:安全点 已{_n}点{_ls} (F2普通/F3跳跃/F10保存)",
+                                (0, 165, 255))
+                            _rec_list, _rec_color = waypoint_patrol.safe_points, (0, 165, 255)
                         elif _wp_hud.is_recording_recall:
-                            _hud_txt, _hud_col = "● 恢复路线录制中 (F2/F3打点, F11保存)", (255, 120, 160)
+                            _n = len(waypoint_patrol.recall_points)
+                            _last = waypoint_patrol.recall_points[-1] if _n else None
+                            _ls = (f" 最近({float(_last['nx']):.3f},{float(_last['ny']):.3f})"
+                                   if _last else "")
+                            _hud_txt, _hud_col = (
+                                f"● 录制:恢复路线 已{_n}点{_ls} (F2普通/F3跳跃/F11保存)",
+                                (180, 105, 255))
+                            _rec_list, _rec_color = waypoint_patrol.recall_points, (180, 105, 255)
                         elif _wp_hud.is_patrolling():
                             _hud_txt, _hud_col = "● 巡航中 (自动, F4 停止)", (0, 255, 160)
                         else:
@@ -7740,6 +7753,24 @@ def main():
                         if _recall_state:
                             _hud_txt += f" | 恢复:{_recall_state}"
                         put_text_cn(frame, _hud_txt, (14, 46), 0.55, _hud_col, 2, cv2.LINE_AA)
+                        # 已录点位画到小地图上(norm -> 画布像素: frame = canvas + norm*canvas_size)
+                        if (_rec_list is not None and _mini_hud is not None
+                                and _mini_hud.get("canvas_frame_box")
+                                and _mini_hud.get("canvas_size")):
+                            _cb = _mini_hud["canvas_frame_box"]
+                            _cs = _mini_hud["canvas_size"]
+                            _pts = []
+                            for _rp in _rec_list:
+                                _px = int(_cb[0] + float(_rp["nx"]) * _cs[0])
+                                _py = int(_cb[1] + float(_rp["ny"]) * _cs[1])
+                                _pts.append((_px, _py))
+                            for _i in range(max(0, len(_pts) - 1)):
+                                cv2.line(frame, _pts[_i], _pts[_i + 1],
+                                         _rec_color, 1, cv2.LINE_AA)
+                            for _p in _pts:
+                                cv2.circle(frame, _p, 3, _rec_color, -1, cv2.LINE_AA)
+                            if _pts:  # 最后一个点绿色圈标出(当前/最近打的点)
+                                cv2.circle(frame, _pts[-1], 6, (0, 255, 0), 1, cv2.LINE_AA)
                         # 游戏窗口聚焦状态(角色不动常因游戏未聚焦: 按键发到了别的窗口)
                         _fg = target_is_foreground(cfg["game_window"]["title"])
                         _fg_txt = "游戏窗口: 聚焦 ✓" if _fg else "游戏窗口: 未聚焦 ✗ (自动置前中)"
