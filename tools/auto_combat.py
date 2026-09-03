@@ -6772,8 +6772,7 @@ def main():
     safe_max_trip = float(_safe_cfg.get("max_trip_seconds", 120.0))  # 走向安全点超时(卡住取消)
     # 恢复路线配置(触发判定/冷却)
     _recall_cfg = cfg.get("recall_point", {})
-    recall_y_tol = float(_recall_cfg.get("trigger_y_tol", 0.02))
-    recall_min_gap = float(_recall_cfg.get("min_gap_y", 0.10))
+    recall_y_tol = float(_recall_cfg.get("trigger_y_tol", 0.03))
     recall_cooldown = float(_recall_cfg.get("cooldown_seconds", 30.0))
     recall_max_trip = float(_recall_cfg.get("max_trip_seconds", 120.0))  # 恢复行程超时(卡住取消)
     # The map name (and its recorded route) is auto-detected from the minimap
@@ -7080,19 +7079,22 @@ def main():
                         f"[其他玩家] 检测到 {len(_red_dots)} 个红点, 暂停挂机"
                         f"(红点消失 {OTHER_PLAYER_RESUME_DELAY:.0f} 秒后自动恢复)")
             else:
+                # 红点消失: 记录消失开始时刻(仅一次), 满 delay 自动恢复
+                # (修复: 旧逻辑每帧清 _strip_clear_since, "消失计时"永远只有1帧,
+                #  自动恢复从未触发, 用户必须手动按 F8)
                 if _strip_first_seen is not None:
-                    # 红点消失: 记录消失时间, 满 2 秒自动恢复(跨帧确认防闪烁)
-                    if _strip_clear_since is None:
-                        _strip_clear_since = now
-                    elif (now - _strip_clear_since >= OTHER_PLAYER_RESUME_DELAY
-                          and pause_control.player_pause):
-                        pause_control.resume_from_player_pause()
-                        logger.warning(
-                            f"[其他玩家] 红点消失已满 {OTHER_PLAYER_RESUME_DELAY:.0f} 秒, "
-                            f"自动恢复挂机")
                     _strip_first_seen = None
-                else:
+                    _strip_clear_since = now
+                    logger.info(
+                        f"[其他玩家] 红点已消失, {OTHER_PLAYER_RESUME_DELAY:.1f} 秒后自动恢复")
+                elif (_strip_clear_since is not None
+                        and pause_control.player_pause
+                        and now - _strip_clear_since >= OTHER_PLAYER_RESUME_DELAY):
+                    pause_control.resume_from_player_pause()
                     _strip_clear_since = None
+                    logger.warning(
+                        f"[其他玩家] 红点消失已满 {OTHER_PLAYER_RESUME_DELAY:.1f} 秒, "
+                        f"自动恢复挂机")
             if hasattr(player_detector, "submit_frame"):
                 player_detector.submit_frame(frame)
             # Pass the player box so band-restricted detectors only scan the
@@ -7681,8 +7683,10 @@ def main():
                     logger.info(
                         f"[恢复路线] 恢复完成, 恢复正常巡游({recall_cooldown:.0f}s冷却)")
             else:
-                # 跌落触发: 玩家Y与恢复路线第一个点同水平(±y_tol)== 掉到底层,
-                # 且主航线当前目标明显比玩家高(真掉下去了) -> 走恢复路线回巡游线
+                # 跌落触发(用户要求: 只按 Y 判定): 玩家Y与恢复路线第一个点
+                # 同水平(±trigger_y_tol) == 掉到最下层, 立刻走恢复路线——
+                # 不再要求主航线目标在上方(那会漏判: 掉下来后主航线仍巡航,
+                # 用户反馈"掉下来还是巡航状态"非常严重)。
                 if (policy.mode == "minimap_patrol"
                         and waypoint_patrol.is_patrolling()
                         and not waypoint_patrol.is_recording
@@ -7695,19 +7699,16 @@ def main():
                     _rny = float(recall_patrol.recall_points[0]["ny"])
                     _ny = float(mini["map_norm"][1])
                     if abs(_ny - _rny) <= recall_y_tol:
-                        _tgt = waypoint_patrol.waypoints[waypoint_patrol.idx]
-                        _tny = float(_tgt["ny"])
-                        if (_tny - _ny) >= recall_min_gap:
-                            if recall_patrol.begin_recall():
-                                policy._recall_active = True
-                                _recall_state = "walk"
-                                _recall_at = now
-                                logger.info(
-                                    f"[恢复路线] 跌落检测: 玩家Y={_ny:.4f} 与恢复路线"
-                                    f"起点Y={_rny:.4f} 同水平(目标Y={_tny:.4f}在上方), "
-                                    f"走恢复路线回巡游线")
-                            else:
-                                logger.warning("[恢复路线] 触发失败: 恢复路线为空")
+                        if recall_patrol.begin_recall():
+                            policy._recall_active = True
+                            _recall_state = "walk"
+                            _recall_at = now
+                            logger.warning(
+                                f"[恢复路线] 跌落检测! 玩家Y={_ny:.4f} 与恢复路线"
+                                f"起点Y={_rny:.4f} 同水平(±{recall_y_tol}), "
+                                f"立即走恢复路线回巡游线")
+                        else:
+                            logger.warning("[恢复路线] 触发失败: 恢复路线为空")
                 # 商城/恢复站定阶段: 不打怪不移动
                 if _safe_state in ("wait_t", "wait_esc", "wrap") or _recall_state == "done_wait":
                     command, reason = "none", "safe_store"
