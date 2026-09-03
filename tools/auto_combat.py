@@ -307,6 +307,10 @@ class CombatPolicy:
         self._mini_right_norm = float(mm_patrol.get("right_norm", 0.82))  # map_norm_x>此值(玩家接近地图右端)往左走
         self._mini_left_norm = float(mm_patrol.get("left_norm", 0.18))    # map_norm_x<此值(玩家接近地图左端)往右走
         self._waypoint_patrol = None  # MinimapWaypointPatrol 实例(主循环注入), 用于小地图坐标航点巡逻
+        # 【安全点定时进商城】(测谎仪规避): 主循环状态机控制; 激活时
+        # decide 不再打怪/追怪, 只沿 _safe_patrol 的 one-shot 序列走向安全点。
+        self._safe_active = False
+        self._safe_patrol = None
         self.patrol_deadline = float("-inf")
         self.last_jump_time = float("-inf")
         # 【跳跃后禁攻击】: 记录最近一次跳跃键发出时间, 跳跃后 2 秒内不攻击
@@ -721,6 +725,13 @@ class CombatPolicy:
             # 绝不为了范围外的怪移动/转向; 跳跃爬绳中(_wp_busy)不攻击。
             _wp_busy = (self._waypoint_patrol is not None
                         and bool(self._waypoint_patrol._action_state))
+            # 【安全点定时进商城】: 激活时不打怪不追怪, 只导航安全点 one-shot 序列
+            if self._safe_active and self._safe_patrol is not None:
+                _wpd = self._safe_patrol.decide(
+                    self._mini["map_norm"] if self._mini else None, now)
+                if _wpd is not None:
+                    return _wpd
+                return "none", "safe_wait"
             # 【巡游打怪(绿色范围)】: 以玩家为中心横向 ±patrol_hunt_range_px(默认300)
             # 范围内检测到怪物 -> 角色离开航点路线去追怪消灭(向怪走/攻击);
             # 范围内没有怪 -> 继续走录制的点位巡航。优先级高于巡航但低于跳跃爬绳
@@ -3540,6 +3551,11 @@ class MinimapWaypointPatrol:
         self._step_until = 0.0        # 小步步进冷却: 下次允许 step 的时刻
         self._near_start = 0.0        # move/climb 段"稳定到达"计时起点
         self.last_archive = None      # 最近一次生成的路线存档路径(供用户检查)
+        # ---- 安全点(测谎仪规避: 定时去打怪暂停→走进商城) ----
+        self.safe_points = []          # F10 录制的安全点 [{action, nx, ny}, ...]
+        self.is_recording_safe = False  # F10 安全点录制中(F2/F3 打进 safe_points)
+        self.one_shot = False          # one-shot: 走完最后一个点即停, 不循环
+        self._one_shot_done = False    # one-shot 已走完(主循环据此执行商城脚本)
         # 完成一轮(回到第1点)时的回调(主循环注入, 用于经验统计):
         # 签名 round_complete(round_count). 未注入则无操作。
         self.on_round_complete = None
@@ -3731,23 +3747,27 @@ class MinimapWaypointPatrol:
         action: "move" 或 "jump_takeoff"。map_norm: [nx, ny] 小地图归一化坐标。
         【不四舍五入】: 直接存检测原始值(像素/画布宽度的浮点, 精度远高于4位),
         保证记录的点位就是打点瞬间的真实坐标, 不因 round 产生偏差。"""
+        return self.add_manual_point_to(self.waypoints, action, map_norm)
+
+    def add_manual_point_to(self, target, action, map_norm):
+        """同 add_manual_point, 但写入指定列表(安全点录制时写入 safe_points)。"""
         if map_norm is None:
             logger.warning("[wp] 打点失败: 无小地图坐标")
             return False
         # 原样保留原始精度(不 round): 点位必须精确
         nx, ny = float(map_norm[0]), float(map_norm[1])
         # 与上一点几乎重合 -> 忽略(防止重复打点)
-        if (self.waypoints and abs(nx - self.waypoints[-1]["nx"]) < 0.004
-                and abs(ny - self.waypoints[-1]["ny"]) < 0.004):
+        if (target and abs(nx - target[-1]["nx"]) < 0.004
+                and abs(ny - target[-1]["ny"]) < 0.004):
             logger.info(
                 f"[wp] 打点忽略: 与上一点重合({nx:.4f},{ny:.4f})")
             return False
-        self.waypoints.append({"action": action, "nx": nx, "ny": ny})
-        if len(self.waypoints) > self.max_waypoints:
-            self.waypoints = self.waypoints[-self.max_waypoints:]
+        target.append({"action": action, "nx": nx, "ny": ny})
+        if len(target) > self.max_waypoints:
+            del target[:len(target) - self.max_waypoints]
         _cn = "普通点" if action == "move" else "跳跃点"
         logger.info(
-            f"[wp] {_cn}已打 第{len(self.waypoints)}个: ({nx:.4f},{ny:.4f})")
+            f"[wp] {_cn}已打 第{len(target)}个: ({nx:.4f},{ny:.4f})")
         return True
 
     def _step_cmd(self, dx, reason, now):
@@ -3783,6 +3803,9 @@ class MinimapWaypointPatrol:
             return None
         if self.idx >= len(self.waypoints):
             self.idx = 0
+        # 安全点行程 one-shot 已走完: 停在最后一点(主循环执行商城脚本)
+        if self._one_shot_done:
+            return "none", "safe_done"
         seg = self.waypoints[self.idx]
         action = seg.get("action", "move_left")
         # 环形循环(全程正向): 不做方向翻转——每个点的跳跃语义始终按录制时的
@@ -4316,10 +4339,17 @@ class MinimapWaypointPatrol:
 
     def _next(self):
         """推进到下一段(环形循环): 1→2→…→N→回到第1个点重新开始, 全程正向。
-        (用户要求: 走完最后一个动作后重新循环到第一个点位, 不受最后一个点位影响)"""
+        (用户要求: 走完最后一个动作后重新循环到第一个点位, 不受最后一个点位影响)
+        one-shot 模式(安全点行程): 走完最后一个点不再循环, 停在最后一点。"""
         n = len(self.waypoints)
         self.idx = (self.idx + 1) % n
         if self.idx == 0:
+            if self.one_shot:
+                # 安全点行程: 已走完最后一个点 -> 停在该点, 通知主循环
+                self._one_shot_done = True
+                self.idx = max(0, n - 1)
+                self._reset_attempt()
+                return
             self._round_count += 1   # 走完一整圈回到起点
             logger.info(
                 f"[wp] 完成第 {self._round_count} 圈巡航")
@@ -4335,6 +4365,74 @@ class MinimapWaypointPatrol:
         """失误/超时: 从头开始(回到路线起点)。"""
         self.idx = 0
         self._reset_attempt()
+
+    # ---- 安全点(测谎仪规避) ----
+    def _safe_path(self, map_name):
+        if not map_name:
+            return None
+        return str(Path("minimaps") / map_name / "safe_points.json")
+
+    def load_safe_points(self, map_name=None):
+        """加载安全点(只加载不巡航, 与主航线 waypoints.json 分开存储)。"""
+        if map_name:
+            self.map_name = map_name
+        p = self._safe_path(self.map_name)
+        if not p or not os.path.exists(p):
+            self.safe_points = []
+            return False
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            pts = data.get("points", data) if isinstance(data, dict) else data
+            self.safe_points = [
+                w for w in (pts or [])
+                if isinstance(w, dict) and w.get("action") in self.ACTION_ALL
+                and "nx" in w and "ny" in w
+            ]
+            if self.safe_points:
+                logger.info(
+                    f"[安全点] 已加载 {len(self.safe_points)} 个 -> {p}")
+                return True
+        except Exception:
+            pass
+        self.safe_points = []
+        return False
+
+    def save_safe_points(self, map_name=None):
+        """保存安全点到 minimaps/{地图}/safe_points.json(F10 录制结束时)。"""
+        try:
+            if map_name:
+                self.map_name = map_name
+            p = self._safe_path(self.map_name)
+            if not p or not self.safe_points:
+                return False
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(self.safe_points, f, ensure_ascii=False, indent=1)
+            return True
+        except Exception as e:
+            logger.warning(f"[安全点] 保存失败(不中断运行): {e}")
+            return False
+
+    def begin_safe_visit(self):
+        """开始一次安全点行程: 深拷贝安全点为导航序列, one-shot 走完即停。"""
+        self.one_shot = True
+        self._one_shot_done = False
+        self.waypoints = [dict(w) for w in self.safe_points]
+        self.idx = 0
+        self._reset_attempt()
+        self._patrolling = True
+        return len(self.waypoints) > 0
+
+    def end_safe_visit(self):
+        """结束安全点行程(主航线 waypoint_patrol 状态不受影响)。"""
+        self.one_shot = False
+        self._one_shot_done = False
+        self._patrolling = False
+        self.waypoints = []
+
+    def is_one_shot_done(self):
+        return bool(self._one_shot_done)
 
     # ---- 巡航开关(F1 录制 / F2 结束 / F3 开始 / F4 清除) ----
     def start_patrol(self):
@@ -4946,7 +5044,7 @@ class PauseController:
                 elif name == self.quit_key:
                     self.request_quit()
                     print("[hotkey] quit requested", flush=True)
-                elif name in ("f1", "f2", "f3", "f4", "f6", "f10"):
+                elif name in ("f1", "f2", "f3", "f4", "f6", "f10", "f11"):
                     with self._lock:
                         self.fn_events.append(name)
                 else:
@@ -6580,6 +6678,17 @@ def main():
     # 小地图坐标航点巡逻: 用稳定的 map_norm 精确控制路线(适合大量跳跃/爬绳点的地图)
     waypoint_patrol = MinimapWaypointPatrol(cfg, active_map_name)
     policy._waypoint_patrol = waypoint_patrol
+    # 安全点(测谎仪规避): 独立 one-shot 导航器, 与主航线状态完全分离
+    safe_patrol = MinimapWaypointPatrol(cfg, active_map_name)
+    policy._safe_patrol = safe_patrol
+    # 安全点定时进商城配置(测试周期可在 config 的 safe_point.interval_seconds 调整)
+    _safe_cfg = cfg.get("safe_point", {})
+    safe_interval = float(_safe_cfg.get("interval_seconds", 60.0))
+    safe_wait_before_shop = float(_safe_cfg.get("wait_before_shop", 5.0))
+    safe_wait_in_shop = float(_safe_cfg.get("wait_in_shop", 10.0))
+    safe_shop_key = str(_safe_cfg.get("shop_key", "t"))
+    safe_esc_gap = 0.5   # ESC 与回车之间的间隔(秒)
+    safe_wrap_wait = 1.0 # 回车后等待秒数再恢复巡航
     # The map name (and its recorded route) is auto-detected from the minimap
     # in a background thread: the OCR model load is slow (~5s) and must never
     # block the main loop. When it succeeds the routes become available and
@@ -6617,6 +6726,7 @@ def main():
                         logger.info(
                             f"[auto_combat] 航点已加载, 自动开始路线巡航 "
                             f"({len(waypoint_patrol.waypoints)} 个点)")
+                safe_patrol.load_safe_points(detected)
             if detected and route_follower.load_map_routes(detected):
                 # --route-name 指定时, 优先选择匹配的那条路线
                 if args.route_name:
@@ -6777,6 +6887,11 @@ def main():
     OTHER_PLAYER_RESUME_DELAY = float(
         cfg.get("minimap", {}).get("other_player_resume_seconds", 2.0)
     )  # 红点消失多久自动恢复挂机(用户要求: 消失立即恢复, 2s只是跨帧确认防闪烁)
+    # ---- 安全点定时进商城(测谎仪规避)状态 ----
+    # 状态: "" 空闲 / "walk" 走向安全点 / "wait_t" 到点等5s / "wait_esc" 进商城后等10s / "wrap" 收尾
+    _safe_state = ""
+    _safe_at = 0.0         # 当前阶段开始时刻
+    _safe_next_visit = 0.0 # 下次触发时刻(0=尚未武装, 巡航开始后武装)
     # 红点跨帧确认(codex MinimapRedMarkerTracker): 连续 confirm_frames 帧
     # 同一位置出现才认定是真玩家, 滤掉地图地形/UI 的红色误检。
     _red_tracker = MinimapRedMarkerTracker(
@@ -7124,25 +7239,51 @@ def main():
                     break
                 if fn == "f1":
                     # F1: 启动录制(手动打点模式)——清空旧点, 进入录制状态
+                    if waypoint_patrol.is_recording_safe:
+                        logger.warning("[热键] 安全点录制中, 请先再按 F10 保存安全点")
+                        continue
                     recorder.is_recording = True
                     waypoint_patrol.stop_patrol()
                     waypoint_patrol.clear()
                     waypoint_patrol.is_recording = True
                     logger.info("[热键] F1 启动录制: 手动走到点位后按 F2 打普通点 / F3 打跳跃点, F4 保存")
                 elif fn == "f2":
-                    # F2: 打普通点(记录当前位置为 move 点)
-                    if waypoint_patrol.add_manual_point(
-                            "move", mini["map_norm"] if mini else None):
+                    # F2: 打普通点(安全点录制中打进 safe_points, 否则打主航线)
+                    _target = (waypoint_patrol.safe_points
+                               if waypoint_patrol.is_recording_safe
+                               else waypoint_patrol.waypoints)
+                    _ok = False
+                    if waypoint_patrol.is_recording_safe:
+                        _ok = waypoint_patrol.add_manual_point_to(
+                            _target, "move", mini["map_norm"] if mini else None)
+                        _n = len(_target)
+                        waypoint_patrol.safe_points = _target
+                    else:
+                        _ok = waypoint_patrol.add_manual_point(
+                            "move", mini["map_norm"] if mini else None)
+                        _n = len(waypoint_patrol.waypoints)
+                    if _ok:
                         logger.info(
-                            f"[热键] F2 普通点已打 (共 {len(waypoint_patrol.waypoints)} 个)")
+                            f"[热键] F2 普通点已打 (共 {_n} 个"
+                            f"{', 安全点' if waypoint_patrol.is_recording_safe else ''})")
                     else:
                         logger.warning("[热键] F2 打点失败(无小地图坐标或与上一点重合)")
                 elif fn == "f3":
-                    # F3: 打跳跃点(记录当前位置为 jump_takeoff 起跳点)
-                    if waypoint_patrol.add_manual_point(
-                            "jump_takeoff", mini["map_norm"] if mini else None):
+                    # F3: 打跳跃点(安全点录制中打进 safe_points, 否则打主航线)
+                    _ok = False
+                    if waypoint_patrol.is_recording_safe:
+                        _ok = waypoint_patrol.add_manual_point_to(
+                            waypoint_patrol.safe_points, "jump_takeoff",
+                            mini["map_norm"] if mini else None)
+                        _n = len(waypoint_patrol.safe_points)
+                    else:
+                        _ok = waypoint_patrol.add_manual_point(
+                            "jump_takeoff", mini["map_norm"] if mini else None)
+                        _n = len(waypoint_patrol.waypoints)
+                    if _ok:
                         logger.info(
-                            f"[热键] F3 跳跃点已打 (共 {len(waypoint_patrol.waypoints)} 个)")
+                            f"[热键] F3 跳跃点已打 (共 {_n} 个"
+                            f"{', 安全点' if waypoint_patrol.is_recording_safe else ''})")
                     else:
                         logger.warning("[热键] F3 打点失败(无小地图坐标或与上一点重合)")
                 elif fn == "f4":
@@ -7208,7 +7349,29 @@ def main():
                                 waypoint_patrol.idx = 0
                                 waypoint_patrol.start_patrol()
                 elif fn == "f10":
-                    # F10: 恢复上个加载的点位(补救误按 F1)-> 丢弃当前内存点
+                    # F10: 安全点录制开关(测谎仪规避: 定时去打怪暂停→走进商城)
+                    if waypoint_patrol.is_recording:
+                        logger.warning(
+                            "[热键] 主航线录制中(F1), 请先 F4 保存/F5 清空再录安全点")
+                    elif waypoint_patrol.is_recording_safe:
+                        waypoint_patrol.is_recording_safe = False
+                        if not waypoint_patrol.safe_points:
+                            logger.warning("[热键] 安全点保存失败: 没有打点(F2/F3)")
+                        elif active_map_name and waypoint_patrol.save_safe_points(active_map_name):
+                            logger.info(
+                                f"[热键] 安全点已保存 {len(waypoint_patrol.safe_points)} 个 "
+                                f"-> minimaps/{active_map_name}/safe_points.json")
+                            waypoint_patrol.load_safe_points(active_map_name)
+                        else:
+                            logger.warning("[热键] 安全点保存失败(无地图名或写入异常)")
+                    else:
+                        waypoint_patrol.is_recording_safe = True
+                        waypoint_patrol.safe_points = []
+                        logger.info(
+                            "[热键] F10 开始录制安全点: 走位按 F2 普通点 / F3 跳跃点, "
+                            "走到最后的商城位再按 F10 保存")
+                elif fn == "f11":
+                    # F11: 恢复上个加载的点位(补救误按 F1)-> 丢弃当前内存点
                     # (可能被 F1 清空), 从磁盘 waypoints.json 重新加载并恢复巡航。
                     recorder.is_recording = False
                     waypoint_patrol.is_recording = False
@@ -7217,11 +7380,11 @@ def main():
                         waypoint_patrol.idx = 0
                         waypoint_patrol.start_patrol()
                         logger.info(
-                            f"[热键] F10 已恢复上次加载的点位: "
+                            f"[热键] F11 已恢复上次加载的点位: "
                             f"{len(waypoint_patrol.waypoints)} 个航点, 恢复巡航")
                     else:
                         logger.warning(
-                            "[热键] F10 恢复失败: 磁盘上没有可用航点"
+                            "[热键] F11 恢复失败: 磁盘上没有可用航点"
                             "(请先 F4 保存过路线, 或重新 F1-F3 录制)")
                 elif fn == "f7":
                     # F7: 仅保存航点到磁盘(方便下次直接 F3 加载, 不启动巡航)
@@ -7234,6 +7397,69 @@ def main():
                 # 注意: F8 是全局暂停/恢复键(pause_key), 由 PauseController 监听器
                 # 处理——检测到其他玩家暂停后按 F8 恢复挂机, 不经过 fn_events。
                 # 清空航点请用 F5。
+
+            # ---- 安全点定时进商城(测谎仪规避): 触发 + 状态机 ----
+            # 挂机(F8/红点)期间整个状态机冻结, 恢复后从原阶段继续。
+            if not pause_control.is_effectively_paused():
+                if _safe_state == "walk":
+                    if not waypoint_patrol.is_patrolling():
+                        # 巡游被停止(F5/手动): 取消安全点行程
+                        logger.warning("[安全点] 巡游已停止, 取消安全点行程")
+                        policy._safe_active = False
+                        safe_patrol.end_safe_visit()
+                        _safe_state = ""
+                    elif safe_patrol.is_one_shot_done():
+                        executor.release_all()   # 到点了: 松开全部按键, 站定
+                        logger.info(
+                            f"[安全点] 已走到最后一个安全点, "
+                            f"{safe_wait_before_shop:.0f} 秒后按 {safe_shop_key} 进商城")
+                        _safe_state = "wait_t"
+                        _safe_at = now
+                elif _safe_state == "wait_t":
+                    if now - _safe_at >= safe_wait_before_shop:
+                        press_key(safe_shop_key, 0.15)
+                        logger.info(f"[安全点] 已按 {safe_shop_key} 进入商城")
+                        _safe_state = "wait_esc"
+                        _safe_at = now
+                elif _safe_state == "wait_esc":
+                    if now - _safe_at >= safe_wait_in_shop:
+                        press_key("esc", 0.15)
+                        time.sleep(safe_esc_gap)
+                        press_key("enter", 0.15)
+                        logger.info("[安全点] 按 ESC + 回车返回游戏")
+                        _safe_state = "wrap"
+                        _safe_at = now
+                elif _safe_state == "wrap":
+                    if now - _safe_at >= safe_wrap_wait:
+                        _safe_state = ""
+                        policy._safe_active = False
+                        safe_patrol.end_safe_visit()
+                        _safe_next_visit = now + safe_interval
+                        logger.info(
+                            f"[安全点] 商城流程完成, 恢复巡游(下次 {safe_interval:.0f} 秒后)")
+                else:
+                    # 空闲: 首次武装计时(巡航开始后) / 满 interval 触发
+                    if (_safe_next_visit == 0.0 and waypoint_patrol.is_patrolling()
+                            and not waypoint_patrol.is_recording
+                            and not waypoint_patrol.is_recording_safe):
+                        _safe_next_visit = now + safe_interval
+                    elif (waypoint_patrol.is_patrolling()
+                          and not waypoint_patrol.is_recording
+                          and not waypoint_patrol.is_recording_safe
+                          and policy.mode == "minimap_patrol"
+                          and safe_patrol.safe_points
+                          and now >= _safe_next_visit):
+                        if safe_patrol.begin_safe_visit():
+                            policy._safe_active = True
+                            _safe_state = "walk"
+                            logger.info(
+                                f"[安全点] 触发! 停止打怪, 走向安全点"
+                                f"({len(safe_patrol.safe_points)} 个), 到达后进商城")
+                        else:
+                            logger.warning("[安全点] 触发失败: 安全点序列为空")
+                # 商城脚本阶段: 站定不动(不打怪不移动)
+                if _safe_state in ("wait_t", "wait_esc", "wrap"):
+                    command, reason = "none", "safe_store"
 
             if args.foreground_gate and not target_is_foreground(
                 cfg["game_window"]["title"]
@@ -7293,6 +7519,8 @@ def main():
                             _hud_txt, _hud_col = "● 巡航中 (自动, F4 停止)", (0, 255, 160)
                         else:
                             _hud_txt, _hud_col = "○ 待命 (F1 录 / F3 巡航)", (210, 210, 120)
+                        if _safe_state:
+                            _hud_txt += f" | 安全点:{_safe_state}"
                         put_text_cn(frame, _hud_txt, (14, 46), 0.55, _hud_col, 2, cv2.LINE_AA)
                         # 游戏窗口聚焦状态(角色不动常因游戏未聚焦: 按键发到了别的窗口)
                         _fg = target_is_foreground(cfg["game_window"]["title"])
