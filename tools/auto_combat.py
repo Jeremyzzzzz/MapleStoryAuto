@@ -6892,6 +6892,8 @@ def main():
     _safe_state = ""
     _safe_at = 0.0         # 当前阶段开始时刻
     _safe_next_visit = 0.0 # 下次触发时刻(0=尚未武装, 巡航开始后武装)
+    _safe_pending = False  # 计时到期但正在等"走完当前圈(到最后一个巡游点)"再触发
+    _last_round_count = 0  # 主航线完成的圈数(变化 = 刚走完最后一个巡游点)
     # 红点跨帧确认(codex MinimapRedMarkerTracker): 连续 confirm_frames 帧
     # 同一位置出现才认定是真玩家, 滤掉地图地形/UI 的红色误检。
     _red_tracker = MinimapRedMarkerTracker(
@@ -7438,25 +7440,44 @@ def main():
                         logger.info(
                             f"[安全点] 商城流程完成, 恢复巡游(下次 {safe_interval:.0f} 秒后)")
                 else:
-                    # 空闲: 首次武装计时(巡航开始后) / 满 interval 触发
-                    if (_safe_next_visit == 0.0 and waypoint_patrol.is_patrolling()
-                            and not waypoint_patrol.is_recording
-                            and not waypoint_patrol.is_recording_safe):
-                        _safe_next_visit = now + safe_interval
-                    elif (waypoint_patrol.is_patrolling()
-                          and not waypoint_patrol.is_recording
-                          and not waypoint_patrol.is_recording_safe
-                          and policy.mode == "minimap_patrol"
-                          and safe_patrol.safe_points
-                          and now >= _safe_next_visit):
-                        if safe_patrol.begin_safe_visit():
-                            policy._safe_active = True
-                            _safe_state = "walk"
-                            logger.info(
-                                f"[安全点] 触发! 停止打怪, 走向安全点"
-                                f"({len(safe_patrol.safe_points)} 个), 到达后进商城")
-                        else:
-                            logger.warning("[安全点] 触发失败: 安全点序列为空")
+                    # 空闲: 首次武装计时(巡航开始后); 计时到期后不立即打断,
+                    # 而是挂起(_safe_pending), 等主航线【走完这一圈、到达最后一个
+                    # 巡游点】时才触发去安全点(用户要求: 防止中途点位走不到安全点)
+                    if not waypoint_patrol.is_patrolling():
+                        if _safe_pending:
+                            logger.info("[安全点] 巡游已停止, 取消待触发的安全点")
+                            _safe_pending = False
+                        _last_round_count = waypoint_patrol._round_count
+                    elif (waypoint_patrol.is_recording
+                          or waypoint_patrol.is_recording_safe):
+                        _last_round_count = waypoint_patrol._round_count
+                    elif (policy.mode == "minimap_patrol"
+                          and safe_patrol.safe_points):
+                        if _safe_next_visit == 0.0:
+                            _safe_next_visit = now + safe_interval
+                        _rc = waypoint_patrol._round_count
+                        if not _safe_pending:
+                            if now >= _safe_next_visit:
+                                _safe_pending = True
+                                logger.info(
+                                    f"[安全点] 计时满 {safe_interval:.0f} 秒, 等待走完"
+                                    f"当前这一圈(到最后一个巡游点)再进安全点")
+                        elif _rc != _last_round_count:
+                            # 刚走完最后一个巡游点(回到起点的瞬间) -> 触发
+                            if safe_patrol.begin_safe_visit():
+                                policy._safe_active = True
+                                _safe_state = "walk"
+                                _safe_pending = False
+                                _safe_next_visit = now + safe_interval
+                                logger.info(
+                                    f"[安全点] 触发! 刚走完最后一个巡游点, "
+                                    f"停止打怪走向安全点({len(safe_patrol.safe_points)} 个)")
+                            else:
+                                logger.warning("[安全点] 触发失败: 安全点序列为空")
+                                _safe_pending = False
+                        _last_round_count = _rc
+                    else:
+                        _last_round_count = waypoint_patrol._round_count
                 # 商城脚本阶段: 站定不动(不打怪不移动)
                 if _safe_state in ("wait_t", "wait_esc", "wrap"):
                     command, reason = "none", "safe_store"
