@@ -7342,8 +7342,12 @@ def main():
                 policy.stop_climbing()
                 command, reason = "none", "climb_disabled"
 
-            # 航点录制中: 抑制 bot 自身移动, 完全交给用户手动操控(否则 bot 和用户抢按键)
-            if waypoint_patrol.is_recording:
+            # 任何录制中(主航线/安全点/恢复路线): 抑制 bot 自身移动/攻击,
+            # 完全交给用户手动操控(否则 bot 和用户抢按键, 且进行中的行程会
+            # 抢键——修复: 用户 F11 录制时角色还被恢复行程拖着走)。
+            if (waypoint_patrol.is_recording
+                    or waypoint_patrol.is_recording_safe
+                    or waypoint_patrol.is_recording_recall):
                 command, reason = "none", "wp_recording"
 
             # 功能键: F1 开始录制 / F2 结束录制 / F3 开始路线巡航 / F4 清除路线.
@@ -7505,6 +7509,7 @@ def main():
                         else:
                             logger.warning("[热键] 安全点保存失败(无地图名或写入异常)")
                     else:
+                        _reset_trip_states()   # 录入安全点=手动操控, 取消进行中的行程
                         waypoint_patrol.is_recording_safe = True
                         waypoint_patrol.safe_points = []
                         logger.info(
@@ -7529,6 +7534,7 @@ def main():
                         else:
                             logger.warning("[热键] 恢复路线保存失败(无地图名或写入异常)")
                     else:
+                        _reset_trip_states()   # 录入恢复路线=手动操控, 取消进行中的行程
                         waypoint_patrol.is_recording_recall = True
                         waypoint_patrol.recall_points = []
                         logger.info(
@@ -7712,6 +7718,13 @@ def main():
                 # 商城/恢复站定阶段: 不打怪不移动
                 if _safe_state in ("wait_t", "wait_esc", "wrap") or _recall_state == "done_wait":
                     command, reason = "none", "safe_store"
+
+            # 【安全点/恢复路线行程中绝对禁攻击】(最终兜底): 任何来源的攻击
+            # 命令(含未来改动/覆盖逻辑引入的)在行程中一律不执行——
+            # 用户要求: 安全WALK/恢复WALK 不打怪不追怪只走路。
+            if (policy._safe_active or policy._recall_active):
+                if isinstance(command, str) and command.startswith("attack"):
+                    command, reason = "none", "trip_no_attack"
 
             if args.foreground_gate and not target_is_foreground(
                 cfg["game_window"]["title"]
