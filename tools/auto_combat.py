@@ -6769,11 +6769,13 @@ def main():
     safe_shop_key = str(_safe_cfg.get("shop_key", "t"))
     safe_esc_gap = 0.5   # ESC 与回车之间的间隔(秒)
     safe_wrap_wait = 1.0 # 回车后等待秒数再恢复巡航
+    safe_max_trip = float(_safe_cfg.get("max_trip_seconds", 120.0))  # 走向安全点超时(卡住取消)
     # 恢复路线配置(触发判定/冷却)
     _recall_cfg = cfg.get("recall_point", {})
     recall_y_tol = float(_recall_cfg.get("trigger_y_tol", 0.02))
     recall_min_gap = float(_recall_cfg.get("min_gap_y", 0.10))
     recall_cooldown = float(_recall_cfg.get("cooldown_seconds", 30.0))
+    recall_max_trip = float(_recall_cfg.get("max_trip_seconds", 120.0))  # 恢复行程超时(卡住取消)
     # The map name (and its recorded route) is auto-detected from the minimap
     # in a background thread: the OCR model load is slow (~5s) and must never
     # block the main loop. When it succeeds the routes become available and
@@ -6985,6 +6987,24 @@ def main():
     _recall_state = ""
     _recall_at = 0.0           # 当前阶段开始时刻
     _recall_cooldown_until = 0.0  # 恢复完成后冷却(防反复跌落触发)
+
+    def _reset_trip_states():
+        """F4/F1/F5: 全部重新来——取消安全点/恢复路线行程, 计时重新武装。
+        (修复: 用户按 F4 想重开巡航, 但安全点行程状态未清, 又接着走安全点)"""
+        nonlocal _safe_state, _safe_at, _safe_next_visit, _safe_pending
+        nonlocal _recall_state, _recall_at, _recall_cooldown_until, _last_round_count
+        policy._safe_active = False
+        safe_patrol.end_safe_visit()
+        _safe_state = ""
+        _safe_at = 0.0
+        _safe_pending = False
+        _safe_next_visit = 0.0
+        policy._recall_active = False
+        recall_patrol.end_recall()
+        _recall_state = ""
+        _recall_at = 0.0
+        _recall_cooldown_until = 0.0
+        _last_round_count = waypoint_patrol._round_count
     # 红点跨帧确认(codex MinimapRedMarkerTracker): 连续 confirm_frames 帧
     # 同一位置出现才认定是真玩家, 滤掉地图地形/UI 的红色误检。
     _red_tracker = MinimapRedMarkerTracker(
@@ -7338,6 +7358,7 @@ def main():
                     if waypoint_patrol.is_recording_recall:
                         logger.warning("[热键] 恢复路线录制中, 请先再按 F11 保存恢复路线")
                         continue
+                    _reset_trip_states()   # 全部重新来: 取消安全点/恢复行程
                     recorder.is_recording = True
                     waypoint_patrol.stop_patrol()
                     waypoint_patrol.clear()
@@ -7399,6 +7420,7 @@ def main():
                     if waypoint_patrol.is_recording_recall:
                         logger.warning("[热键] 恢复路线录制中, 请先再按 F11 保存恢复路线")
                         continue
+                    _reset_trip_states()   # F4 = 全部重新来: 取消安全点/恢复行程, 计时从零
                     waypoint_patrol.is_recording = False
                     recorder.is_recording = False
                     if not waypoint_patrol.waypoints:
@@ -7417,6 +7439,7 @@ def main():
                                 f"起点→终点→起点往返)")
                 elif fn == "f5":
                     # F5: 清空录制(停巡航 + 清内存点, 磁盘存档保留)
+                    _reset_trip_states()   # 全部重新来: 取消安全点/恢复行程
                     recorder.is_recording = False
                     waypoint_patrol.is_recording = False
                     waypoint_patrol.is_recording_safe = False
@@ -7538,6 +7561,16 @@ def main():
                             f"{safe_wait_before_shop:.0f} 秒后按 {safe_shop_key} 进商城")
                         _safe_state = "wait_t"
                         _safe_at = now
+                    elif now - _safe_at >= safe_max_trip:
+                        # 行程超时(导航卡住/掉到不可达平台): 取消, 恢复巡游,
+                        # 下次触发顺延——避免永远卡在安全点路上
+                        logger.warning(
+                            f"[安全点] 走向安全点超时({safe_max_trip:.0f}s), "
+                            f"取消行程恢复巡游")
+                        policy._safe_active = False
+                        safe_patrol.end_safe_visit()
+                        _safe_state = ""
+                        _safe_next_visit = now + safe_interval
                 elif _safe_state == "wait_t":
                     if now - _safe_at >= safe_wait_before_shop:
                         press_key(safe_shop_key, 0.15)
@@ -7564,6 +7597,7 @@ def main():
                             if recall_patrol.begin_recall():
                                 policy._recall_active = True
                                 _recall_state = "walk"
+                                _recall_at = now
                                 logger.info(
                                     "[恢复路线] 安全点商城返回, 走恢复路线回巡游路线")
                             else:
@@ -7596,15 +7630,22 @@ def main():
                                     f"[安全点] 计时满 {safe_interval:.0f} 秒, 等待走完"
                                     f"当前这一圈(到最后一个巡游点)再进安全点")
                         elif _rc != _last_round_count:
-                            # 刚走完最后一个巡游点(回到起点的瞬间) -> 触发
+                            # 刚走完最后一个巡游点(回到起点的瞬间) -> 触发:
+                            # 角色正站在最后巡游点, 从此点连接安全点[0]
+                            _mnx0 = float(mini["map_norm"][0])
+                            _mny0 = float(mini["map_norm"][1])
                             if safe_patrol.begin_safe_visit():
                                 policy._safe_active = True
                                 _safe_state = "walk"
+                                _safe_at = now
                                 _safe_pending = False
                                 _safe_next_visit = now + safe_interval
+                                _sp0 = safe_patrol.safe_points[0]
                                 logger.info(
-                                    f"[安全点] 触发! 刚走完最后一个巡游点, "
-                                    f"停止打怪走向安全点({len(safe_patrol.safe_points)} 个)")
+                                    f"[安全点] 触发! 从最后巡游点(当前 "
+                                    f"{_mnx0:.4f},{_mny0:.4f}) 连接安全点[0]"
+                                    f"({float(_sp0['nx']):.4f},{float(_sp0['ny']):.4f}) "
+                                    f"→ 走向安全点({len(safe_patrol.safe_points)} 个)")
                             else:
                                 logger.warning("[安全点] 触发失败: 安全点序列为空")
                                 _safe_pending = False
@@ -7622,6 +7663,15 @@ def main():
                     _recall_state = "done_wait"
                     _recall_at = now
                     logger.info("[恢复路线] 已走回, 稍后恢复正常巡游")
+                elif now - _recall_at >= recall_max_trip:
+                    # 恢复行程超时(卡住/走不回): 取消恢复巡游, 冷却后另判
+                    logger.warning(
+                        f"[恢复路线] 恢复行程超时({recall_max_trip:.0f}s), "
+                        f"取消行程恢复巡游")
+                    policy._recall_active = False
+                    recall_patrol.end_recall()
+                    _recall_state = ""
+                    _recall_cooldown_until = now + recall_cooldown
             elif _recall_state == "done_wait":
                 if now - _recall_at >= 1.0:
                     _recall_state = ""
@@ -7651,6 +7701,7 @@ def main():
                             if recall_patrol.begin_recall():
                                 policy._recall_active = True
                                 _recall_state = "walk"
+                                _recall_at = now
                                 logger.info(
                                     f"[恢复路线] 跌落检测: 玩家Y={_ny:.4f} 与恢复路线"
                                     f"起点Y={_rny:.4f} 同水平(目标Y={_tny:.4f}在上方), "
