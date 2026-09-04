@@ -3574,6 +3574,7 @@ class MinimapWaypointPatrol:
         self.is_recording_recall = False  # F11 恢复路线录制中(F2/F3 打进 recall_points)
         self.one_shot = False          # one-shot: 走完最后一个点即停, 不循环
         self._one_shot_done = False    # one-shot 已走完(主循环据此执行商城脚本)
+        self._plat_stall_ts = 0.0      # Y平台校验"整圈无同平台点"停滞警告节流
         # 完成一轮(回到第1点)时的回调(主循环注入, 用于经验统计):
         # 签名 round_complete(round_count). 未注入则无操作。
         self.on_round_complete = None
@@ -3804,6 +3805,17 @@ class MinimapWaypointPatrol:
         return "none", reason + "_w"
 
     # ---- 回放(逐段执行 + 失误从头, 纯录制回放) ----
+    def _find_same_platform(self, start_idx, cur_ny):
+        """从 start_idx 起(环形)找第一个与 cur_ny 同平台(|ΔY|<=recover_y_tol)的段。
+        返回索引; 整圈都没有返回 -1。"""
+        n = len(self.waypoints)
+        for _k in range(n):
+            _i = (start_idx + _k) % n
+            _d = abs(float(self.waypoints[_i]["ny"]) - cur_ny)
+            if _d <= self.recover_y_tol + 1e-9:
+                return _i
+        return -1
+
     def decide(self, map_norm, now):
         """按动作段序列执行(纯录制回放): 直接看 JSON 里记录的到达方式执行,
         不做 dx/dy 几何逻辑判断。每段到达目标才推进下一段;
@@ -3831,6 +3843,32 @@ class MinimapWaypointPatrol:
         tnx, tny = float(seg["nx"]), float(seg["ny"])
         nx, ny = float(map_norm[0]), float(map_norm[1])
         dx, dy = tnx - nx, tny - ny
+
+        # 【Y平台校验(用户要求: 只有相同Y坐标的点才会被巡航选中)】:
+        # 当前段点与角色不在同平台(ΔY > recover_y_tol)时不执行该点——
+        # 前进方向找第一个同Y段切换过去; 整圈都没有则停滞等待(节流警告),
+        # 绝不原地跳/死循环(修复: A平台角色触发B平台同X跳点原地一直跳,
+        # 以及无同平台点时'恢复→重启'无限死循环导致圈走不完, 安全点/
+        # 经验统计全部卡死)。爬绳段(climb)目标在上方属正常, 不校验。
+        if (not self._action_state
+                and action not in self.ACTION_CLIMB
+                and abs(ny - tny) > self.recover_y_tol):
+            _bi = self._find_same_platform(self.idx, ny)
+            if _bi >= 0:
+                logger.warning(
+                    f"[wp] 段{self.idx + 1} 点Y={tny:.4f} 与角色Y={ny:.4f} "
+                    f"不在同平台(ΔY={abs(ny - tny):+.4f}), 切换到同平台点"
+                    f" 第{_bi + 1}个")
+                self.idx = _bi
+                self._reset_attempt()
+            else:
+                if now - self._plat_stall_ts > 5.0:
+                    self._plat_stall_ts = now
+                    logger.warning(
+                        f"[wp] 角色所在平台(Y={ny:.4f}) 整圈无匹配点位, "
+                        f"停止执行等待 — 请重新录制路线(F1-F4)或按 F6 重定位")
+                self._point_start = now   # 停滞等待: 不触发40s超时重启
+            return "none", "wp_y_platform"
 
         # ---- 超时保护: 当前段尝试过久 -> 从头开始 ----
         if self._point_start == 0.0:
@@ -4168,18 +4206,9 @@ class MinimapWaypointPatrol:
           - Y 差 >= 0.05(目标在下方) -> 跳下。
         起跳位置必须精确对齐(锁定 + 防抖 0.3s)。
         跳台阶/跳下落地未达目标点(失误/掉坑) -> 同 Y 点位恢复(从同 Y 的点继续)。
-        【Y平台校验(用户要求: 只有相同Y坐标的点才会被巡航选中)】: 跳跃点段
-        若与角色不在同平台(|ΔY| > recover_y_tol), 直接同Y恢复——修复"角色在
-        A平台(上层)巡航却触发B平台(下层)同X跳跃点, 原地一直跳"的问题:
-        原来跳点对齐只看 X, 角色错层也会按跳点方式起跳。
+        注意: Y平台校验(同平台才选中)在 decide() 顶部统一做(未起跳时),
+        这里不做(起跳/空中 Y 变化大, 会误伤)。
         """
-        # 【Y平台校验】: 角色必须与跳点同平台(同层Y), 否则该跳点不可达
-        if abs(ny - tny) > self.recover_y_tol:
-            logger.warning(
-                f"[wp] 段{self.idx + 1} 跳点Y={tny:.4f} 与角色Y={ny:.4f} "
-                f"不在同平台(ΔY={abs(ny - tny):+.4f}), 按同平台点位恢复")
-            self._recover_same_y(ny)
-            return "none", "wp_recover"
         n = len(self.waypoints)
         # 落点目标 = 下一个点(环形循环: 始终取 idx+1, 最后一个点回到第1个点)
         _nidx = self.idx + 1
