@@ -6761,15 +6761,32 @@ def main():
     # 恢复路线(安全点退出商城后/跌落底层走回巡游线): 同样独立 one-shot 导航器
     recall_patrol = MinimapWaypointPatrol(cfg, active_map_name)
     policy._recall_patrol = recall_patrol
-    # 安全点定时进商城配置(测试周期可在 config 的 safe_point.interval_seconds 调整)
+    # 安全点定时进商城配置: 每小时 schedule_minutes(默认整点/半点)触发,
+    # 每次进商城 wait_in_shop 秒(5分钟)后 ESC+回车返回。
     _safe_cfg = cfg.get("safe_point", {})
-    safe_interval = float(_safe_cfg.get("interval_seconds", 60.0))
+    safe_sched = sorted({int(float(m)) % 60 for m in
+                         _safe_cfg.get("schedule_minutes", [0, 30])})
     safe_wait_before_shop = float(_safe_cfg.get("wait_before_shop", 5.0))
-    safe_wait_in_shop = float(_safe_cfg.get("wait_in_shop", 10.0))
+    safe_wait_in_shop = float(_safe_cfg.get("wait_in_shop", 300.0))
     safe_shop_key = str(_safe_cfg.get("shop_key", "t"))
     safe_esc_gap = 0.5   # ESC 与回车之间的间隔(秒)
     safe_wrap_wait = 1.0 # 回车后等待秒数再恢复巡航
     safe_max_trip = float(_safe_cfg.get("max_trip_seconds", 120.0))  # 走向安全点超时(卡住取消)
+
+    def _next_safe_slot_ts():
+        """下一个安全点触发时刻(本地时间, epoch 秒): 每个小时的
+        schedule_minutes 分钟(默认 0=整点 / 30=半点, 如 8:30、9:00、9:30)。"""
+        _now = datetime.datetime.now()
+        _cands = []
+        for _h in range(24):
+            for _m in safe_sched:
+                _cands.append(_now.replace(
+                    hour=_h, minute=_m, second=0, microsecond=0))
+        _cands.sort()
+        for _c in _cands:
+            if _c > _now:
+                return float(time.mktime(_c.timetuple()))
+        return float(time.mktime(_cands[0].timetuple())) + 86400.0
     # 恢复路线配置(触发判定/冷却)
     _recall_cfg = cfg.get("recall_point", {})
     recall_y_tol = float(_recall_cfg.get("trigger_y_tol", 0.03))
@@ -7571,14 +7588,14 @@ def main():
                         _safe_at = now
                     elif now - _safe_at >= safe_max_trip:
                         # 行程超时(导航卡住/掉到不可达平台): 取消, 恢复巡游,
-                        # 下次触发顺延——避免永远卡在安全点路上
+                        # 下一个安全点时刻顺延——避免永远卡在安全点路上
                         logger.warning(
                             f"[安全点] 走向安全点超时({safe_max_trip:.0f}s), "
                             f"取消行程恢复巡游")
                         policy._safe_active = False
                         safe_patrol.end_safe_visit()
                         _safe_state = ""
-                        _safe_next_visit = now + safe_interval
+                        _safe_next_visit = _next_safe_slot_ts()
                 elif _safe_state == "wait_t":
                     if now - _safe_at >= safe_wait_before_shop:
                         press_key(safe_shop_key, 0.15)
@@ -7598,7 +7615,7 @@ def main():
                         _safe_state = ""
                         policy._safe_active = False
                         safe_patrol.end_safe_visit()
-                        _safe_next_visit = now + safe_interval
+                        _safe_next_visit = _next_safe_slot_ts()
                         if recall_patrol.recall_points:
                             # 退出商城后人物可能掉到别处(不在巡游点平台):
                             # 走恢复路线回到巡游线
@@ -7613,30 +7630,33 @@ def main():
                         else:
                             logger.info(
                                 f"[安全点] 商城流程完成, 恢复巡游"
-                                f"(下次 {safe_interval:.0f} 秒后)")
+                                f"(下次 {datetime.datetime.fromtimestamp(_safe_next_visit).strftime('%H:%M')})")
                 else:
-                    # 空闲: 首次武装计时(巡航开始后); 计时到期后不立即打断,
-                    # 而是挂起(_safe_pending), 等主航线【走完这一圈、到达最后一个
-                    # 巡游点】时才触发去安全点(用户要求: 防止中途点位走不到安全点)
+                    # 空闲: 安全点时刻 = 每小时 schedule_minutes(整点/半点);
+                    # 到点后不立即打断, 而是挂起(_safe_pending), 等主航线
+                    # 【走完这一圈、到达最后一个巡游点】时才触发(用户要求:
+                    # 防止中途点位走不到安全点)。
                     if not waypoint_patrol.is_patrolling():
                         if _safe_pending:
                             logger.info("[安全点] 巡游已停止, 取消待触发的安全点")
                             _safe_pending = False
                         _last_round_count = waypoint_patrol._round_count
                     elif (waypoint_patrol.is_recording
-                          or waypoint_patrol.is_recording_safe):
+                          or waypoint_patrol.is_recording_safe
+                          or waypoint_patrol.is_recording_recall):
                         _last_round_count = waypoint_patrol._round_count
                     elif (policy.mode == "minimap_patrol"
                           and safe_patrol.safe_points):
                         if _safe_next_visit == 0.0:
-                            _safe_next_visit = now + safe_interval
+                            _safe_next_visit = _next_safe_slot_ts()
                         _rc = waypoint_patrol._round_count
                         if not _safe_pending:
                             if now >= _safe_next_visit:
                                 _safe_pending = True
                                 logger.info(
-                                    f"[安全点] 计时满 {safe_interval:.0f} 秒, 等待走完"
-                                    f"当前这一圈(到最后一个巡游点)再进安全点")
+                                    f"[安全点] 已到安全点时刻 "
+                                    f"({datetime.datetime.fromtimestamp(_safe_next_visit).strftime('%H:%M')}), "
+                                    f"等待走完当前这一圈(到最后一个巡游点)再进安全点")
                         elif _rc != _last_round_count:
                             # 刚走完最后一个巡游点(回到起点的瞬间) -> 触发:
                             # 角色正站在最后巡游点, 从此点连接安全点[0]
@@ -7647,7 +7667,7 @@ def main():
                                 _safe_state = "walk"
                                 _safe_at = now
                                 _safe_pending = False
-                                _safe_next_visit = now + safe_interval
+                                _safe_next_visit = _next_safe_slot_ts()
                                 _sp0 = safe_patrol.safe_points[0]
                                 logger.info(
                                     f"[安全点] 触发! 从最后巡游点(当前 "
