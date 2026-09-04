@@ -315,6 +315,10 @@ class CombatPolicy:
         # one-shot 导航, 走完恢复路线后从当前位置继续主航线。
         self._recall_active = False
         self._recall_patrol = None
+        # 【安全点"快速到位"抑制】: 到安全点时刻后置 True——立即停止打怪/
+        # 追怪/反击, 主航线直奔最后一个巡游点(用户要求: 不要被怪物拖着,
+        # 等自然走完一圈太慢); 触发安全点行程后复位。
+        self._wp_hunt_suppressed = False
         self.patrol_deadline = float("-inf")
         self.last_jump_time = float("-inf")
         # 【跳跃后禁攻击】: 记录最近一次跳跃键发出时间, 跳跃后 2 秒内不攻击
@@ -643,8 +647,10 @@ class CombatPolicy:
         # 置信度门槛兜底)。hp_dropped 计算保留但不再作为触发条件。
         # 【安全点/恢复路线行程中禁反击】: 走路期间被怪撞也不反击(反击会
         # 转向/位移, 打断行程导致走不到安全点/恢复点)。
+        # 【安全点"快速到位"禁反击】: 到点后直奔最后一个巡游点, 同样不还手。
         if (knocked_back
-                and not (self._safe_active or self._recall_active)
+                and not (self._safe_active or self._recall_active
+                         or self._wp_hunt_suppressed)
                 and now - self._last_counter_at >= 0.15):
             # 反击(所有模式含纯点位巡航): 被怪打/击退立即反击(现仅方向突变触发)。
             # 方向优化: 优先用【当前可见怪物位置】(advisory target_box);
@@ -750,8 +756,8 @@ class CombatPolicy:
             # 【巡游打怪(绿色范围)】: 以玩家为中心横向 ±patrol_hunt_range_px(默认300)
             # 范围内检测到怪物 -> 角色离开航点路线去追怪消灭(向怪走/攻击);
             # 范围内没有怪 -> 继续走录制的点位巡航。优先级高于巡航但低于跳跃爬绳
-            # (_wp_busy 时不抢)。
-            if player and not _wp_busy:
+            # (_wp_busy 时不抢)。安全点"快速到位"时(_wp_hunt_suppressed)不追怪。
+            if player and not _wp_busy and not self._wp_hunt_suppressed:
                 _pc = self._center(player)
                 # 【已取消置信度低不攻击限制】: 玩家识别已稳定(蓝条color_anchor),
                 # 不再因置信度门槛漏攻击。跳跃后 2 秒禁攻击由 _last_jump_at 控制。
@@ -857,7 +863,7 @@ class CombatPolicy:
                     # 【追击卡住检测已取消】: 用户反馈它会怪刷不干净就走;
                     # 追怪被挡时保持追(怪仍在, 且方向防抖/漏检保持兜底)。
                     return f"move_{_hdir}", "hunt_move"
-            if player and not _wp_busy:
+            if player and not _wp_busy and not self._wp_hunt_suppressed:
                 _pc = self._center(player)
                 # 【已取消置信度低不攻击限制】: 玩家识别稳定, 不再因置信度
                 # 漏攻击; 跳跃后 2 秒禁攻击由 _last_jump_at 控制(防跳台掉落)。
@@ -7050,6 +7056,7 @@ def main():
         nonlocal _safe_state, _safe_at, _safe_next_visit, _safe_pending
         nonlocal _recall_state, _recall_at, _recall_cooldown_until, _last_round_count
         policy._safe_active = False
+        policy._wp_hunt_suppressed = False
         safe_patrol.end_safe_visit()
         _safe_state = ""
         _safe_at = 0.0
@@ -7680,6 +7687,7 @@ def main():
                         if _safe_pending:
                             logger.info("[安全点] 巡游已停止, 取消待触发的安全点")
                             _safe_pending = False
+                            policy._wp_hunt_suppressed = False
                         _last_round_count = waypoint_patrol._round_count
                     elif (waypoint_patrol.is_recording
                           or waypoint_patrol.is_recording_safe
@@ -7692,11 +7700,20 @@ def main():
                         _rc = waypoint_patrol._round_count
                         if not _safe_pending:
                             if now >= _safe_next_visit:
+                                # 【用户要求】: 到安全点时刻立即停止打怪/追怪,
+                                # 主航线直奔最后一个巡游点(不等自然走完一圈——
+                                # 被怪物拖着可能拖很久); 到达最后点即进安全点。
                                 _safe_pending = True
+                                policy._wp_hunt_suppressed = True
+                                if waypoint_patrol.waypoints:
+                                    waypoint_patrol.idx = (
+                                        len(waypoint_patrol.waypoints) - 1)
+                                    waypoint_patrol._reset_attempt()
+                                _last_round_count = waypoint_patrol._round_count
                                 logger.info(
                                     f"[安全点] 已到安全点时刻 "
                                     f"({datetime.datetime.fromtimestamp(_safe_next_visit).strftime('%H:%M')}), "
-                                    f"等待走完当前这一圈(到最后一个巡游点)再进安全点")
+                                    f"停止打怪快速走向最后一个巡游点, 到达即进商城")
                         elif _rc != _last_round_count:
                             # 刚走完最后一个巡游点(回到起点的瞬间) -> 触发:
                             # 角色正站在最后巡游点, 从此点连接安全点[0]
@@ -7704,6 +7721,7 @@ def main():
                             _mny0 = float(mini["map_norm"][1])
                             if safe_patrol.begin_safe_visit():
                                 policy._safe_active = True
+                                policy._wp_hunt_suppressed = False  # 安全点行程自有禁怪逻辑
                                 _safe_state = "walk"
                                 _safe_at = now
                                 _safe_pending = False
