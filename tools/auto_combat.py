@@ -4168,7 +4168,18 @@ class MinimapWaypointPatrol:
           - Y 差 >= 0.05(目标在下方) -> 跳下。
         起跳位置必须精确对齐(锁定 + 防抖 0.3s)。
         跳台阶/跳下落地未达目标点(失误/掉坑) -> 同 Y 点位恢复(从同 Y 的点继续)。
+        【Y平台校验(用户要求: 只有相同Y坐标的点才会被巡航选中)】: 跳跃点段
+        若与角色不在同平台(|ΔY| > recover_y_tol), 直接同Y恢复——修复"角色在
+        A平台(上层)巡航却触发B平台(下层)同X跳跃点, 原地一直跳"的问题:
+        原来跳点对齐只看 X, 角色错层也会按跳点方式起跳。
         """
+        # 【Y平台校验】: 角色必须与跳点同平台(同层Y), 否则该跳点不可达
+        if abs(ny - tny) > self.recover_y_tol:
+            logger.warning(
+                f"[wp] 段{self.idx + 1} 跳点Y={tny:.4f} 与角色Y={ny:.4f} "
+                f"不在同平台(ΔY={abs(ny - tny):+.4f}), 按同平台点位恢复")
+            self._recover_same_y(ny)
+            return "none", "wp_recover"
         n = len(self.waypoints)
         # 落点目标 = 下一个点(环形循环: 始终取 idx+1, 最后一个点回到第1个点)
         _nidx = self.idx + 1
