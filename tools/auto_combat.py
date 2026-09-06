@@ -6838,6 +6838,23 @@ def main():
     recall_y_tol = float(_recall_cfg.get("trigger_y_tol", 0.03))
     recall_cooldown = float(_recall_cfg.get("cooldown_seconds", 30.0))
     recall_max_trip = float(_recall_cfg.get("max_trip_seconds", 120.0))  # 恢复行程超时(卡住取消)
+    # 测谎提醒(画面异常检测): 怪物=0+小地图坐标丢失+玩家框消失持续N秒 -> 蜂鸣
+    _cam_cfg = cfg.get("camera_alarm", {})
+    camera_alarm_enabled = bool(_cam_cfg.get("enabled", True))
+    camera_alarm_seconds = float(_cam_cfg.get("seconds", 8.0))
+    camera_alarm_beeps = int(_cam_cfg.get("beeps", 3))
+
+    def _play_camera_alarm(beeps=3):
+        """蜂鸣提醒(后台线程, 不阻塞主循环): 提示测谎弹窗可能已出现。"""
+        def _beep():
+            try:
+                import winsound
+                for _i in range(max(1, int(beeps))):
+                    winsound.Beep(1200, 220)
+                    time.sleep(0.12)
+            except Exception:
+                pass
+        threading.Thread(target=_beep, daemon=True).start()
     # The map name (and its recorded route) is auto-detected from the minimap
     # in a background thread: the OCR model load is slow (~5s) and must never
     # block the main loop. When it succeeds the routes become available and
@@ -7049,6 +7066,9 @@ def main():
     _recall_state = ""
     _recall_at = 0.0           # 当前阶段开始时刻
     _recall_cooldown_until = 0.0  # 恢复完成后冷却(防反复跌落触发)
+    # ---- 测谎提醒状态 ----
+    _cam_bad_since = None   # 画面异常开始时刻(None=正常)
+    _cam_alarmed = False    # 本异常段是否已报警(防每帧重复响)
 
     def _reset_trip_states():
         """F4/F1/F5: 全部重新来——取消安全点/恢复路线行程, 计时重新武装。
@@ -7803,6 +7823,41 @@ def main():
             if (policy._safe_active or policy._recall_active):
                 if isinstance(command, str) and command.startswith("attack"):
                     command, reason = "none", "trip_no_attack"
+
+            # ---- 测谎提醒(画面异常检测) ----
+            # 测谎弹窗弹出时画面被替换(今天18:24实锤): 怪物数=0 + 小地图坐标
+            # 丢失 + 玩家框消失/飘到画面顶部(y<150) 全命中, 且不在安全点/
+            # 恢复行程(商城画面本来就无怪无小地图, 排除) —— 持续
+            # camera_alarm.seconds 秒 => 蜂鸣提醒用户"测谎开始了"。
+            if camera_alarm_enabled:
+                _pc_al = player.get("center") if player else None
+                _p_bad_al = (_pc_al is None
+                             or _pc_al[1] < 150
+                             or (player.get("score", 0.0) or 0.0) < 0.5)
+                _scene_bad = (
+                    policy.mode == "minimap_patrol"
+                    and not policy._safe_active
+                    and not policy._recall_active
+                    and not waypoint_patrol.is_recording
+                    and not waypoint_patrol.is_recording_safe
+                    and not waypoint_patrol.is_recording_recall
+                    and len(cached_monsters) == 0
+                    and (mini is None or not mini.get("map_norm"))
+                    and _p_bad_al
+                )
+                if _scene_bad:
+                    if _cam_bad_since is None:
+                        _cam_bad_since = now
+                    elif (not _cam_alarmed
+                          and now - _cam_bad_since >= camera_alarm_seconds):
+                        _cam_alarmed = True
+                        _play_camera_alarm(camera_alarm_beeps)
+                        logger.warning(
+                            f"[测谎提醒] 画面异常持续{now - _cam_bad_since:.0f}s: "
+                            f"怪物=0/小地图坐标丢失/玩家框消失, 疑似测谎弹窗!")
+                else:
+                    _cam_bad_since = None
+                    _cam_alarmed = False
 
             if args.foreground_gate and not target_is_foreground(
                 cfg["game_window"]["title"]
