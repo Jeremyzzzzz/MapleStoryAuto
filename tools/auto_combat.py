@@ -6310,6 +6310,9 @@ def main():
     cfg = load_config(args.cfg)
     overlay_cfg = cfg["perception_overlay"]
     auto_cfg = cfg.get("auto_combat", {})
+    # 【小地图强跟踪】: 检测框与小地图映射预测偏差超阈值 = 瞬移/飘半空, 拒帧用估计保持
+    _pt_dx = float(overlay_cfg.get("player_strong_track_dx", 220.0))
+    _pt_dy = float(overlay_cfg.get("player_strong_track_dy", 150.0))
     # 【预测框过滤开关】: PREDICTED(带P)框不作为怪物目标(用户反馈这些全是误检)
     _ignore_pred_tracks = bool(auto_cfg.get("ignore_predicted_tracks", True))
     # Multi-character support: apply the character profile (key bindings +
@@ -6423,6 +6426,12 @@ def main():
             _motion_linear = None    # (k, b) 屏幕x = k*mini_x + b
             _last_mini_x = None      # 上一帧 mini_norm_x
             _last_screen_cx = None   # 上一帧屏幕中心x(丢帧估计的起点)
+            # ---- 强跟踪双轴(y轴映射) ----
+            _motion_samples_y = []     # [(mini_y, screen_cy), ...] 最近30个
+            _motion_linear_y = None    # (k, b) 屏幕y = k*mini_y + b
+            _last_mini_y = None        # 上一帧 mini_norm_y
+            _last_screen_cy = None     # 上一帧屏幕中心y(丢帧估计的起点)
+            _tele_warn_at = 0.0        # "检测瞬移"告警节流(每5s一条)
 
             def _update_strip_ref(self, frame, gameplay_height):
                 """从自己 color_anchor 定位的 anchor_box 提取称号条平均色作参照。"""
@@ -6500,46 +6509,93 @@ def main():
                     [best], now, frame.shape[1], gameplay_height, fixed_entity_id="P1")
                 p = enriched[0]
                 x, y, w, h = p["box"]
-                # ---- 小地图运动估计(识别丢失时框不飘) ----
-                # color_anchor 正常: 校准 mini_norm_x -> 屏幕中心x 的线性映射。
-                # color_anchor 丢失(tracker保持/PREdict): 用当前 mini_norm_x
-                # 经映射估计屏幕中心x——角色左走/跳跃时小地图坐标同步移动,
-                # 框跟着角色移动而不是停在原地/飘走。
-                _mini = locate_minimap_player(frame, cfg.get("minimap", {}))
+                # ---- 小地图强跟踪(识别丢失时框不飘 / 防瞬移与飘半空) ----
+                # color_anchor 正常: 校准 mini_norm -> 屏幕中心(x/y) 的线性映射。
+                # 丢失(hold)或【强跟踪拒帧(瞬移)】: 用当前 mini_norm 经映射估计
+                # 屏幕位置——角色左走/跳跃时小地图坐标同步移动, 框跟着角色,
+                # 而不是停在原地/飘走/瞬移到别处。
                 _is_hold = bool(p.get("missed_frames", 0) > 0
                                 or p.get("tracking_state") == "PREDICTED"
                                 or p.get("identity_mode") == "color_anchor_hold")
+                _mini = locate_minimap_player(frame, cfg.get("minimap", {}))
                 if _mini is not None and _mini.get("map_norm"):
                     _mnx = float(_mini["map_norm"][0])
+                    _mny = float(_mini["map_norm"][1])
                     _cx = x + w / 2.0
+                    _cy = y + h / 2.0
+                    # 先用映射预测屏幕位置(双轴); 映射未就绪时为 None
+                    _est_cx = None
+                    _est_cy = None
+                    if self._motion_linear is not None:
+                        _est_cx = self._motion_linear[0] * _mnx + self._motion_linear[1]
+                    if self._motion_linear_y is not None:
+                        _est_cy = self._motion_linear_y[0] * _mny + self._motion_linear_y[1]
+                    # 跳跃豁免: 起跳/落空中(0.6s)框上下移动属正常, y容差放宽
+                    _jump_ex = ((now - getattr(policy, "_last_jump_at", float("-inf"))) < 0.6)
+                    _dx_tol = _pt_dx * (1.2 if _jump_ex else 1.0)
+                    _dy_tol = _pt_dy * (2.0 if _jump_ex else 1.0)
+                    # 【强跟踪拒帧】: 真检测与映射预测偏差超阈值 = 瞬移/飘半空
+                    # (小地图匀速左移时框不可能瞬移右边; Y不变时框不可能飘半空)
+                    _teleported = (not _is_hold
+                                   and ((_est_cx is not None and abs(_cx - _est_cx) > _dx_tol)
+                                        or (_est_cy is not None and abs(_cy - _est_cy) > _dy_tol)))
+                    if _teleported:
+                        if now - self._tele_warn_at > 5.0:
+                            self._tele_warn_at = now
+                            _dx_disp = _cx - _est_cx if _est_cx is not None else 0.0
+                            _dy_disp = _cy - _est_cy if _est_cy is not None else 0.0
+                            logger.warning(
+                                f"[强跟踪] 检测瞬移(dx={_dx_disp:+.0f} dy={_dy_disp:+.0f}), "
+                                f"拒帧改用小地图估计位置保持")
+                        _is_hold = True   # 复用丢失保持路径(映射估计+平滑)
                     if not _is_hold:
-                        # 真识别: 记录校准样本, 拟合线性映射(最近30个, 最小二乘)
+                        # 真识别: 记录双轴校准样本, 拟合线性映射(最近30个, 最小二乘)
                         self._motion_samples.append((_mnx, _cx))
                         if len(self._motion_samples) > 30:
                             self._motion_samples.pop(0)
                         if len(self._motion_samples) >= 3:
-                            _xs = np.asarray([s[0] for s in self._motion_samples])
-                            _ys = np.asarray([s[1] for s in self._motion_samples])
                             try:
-                                _k, _b = np.polyfit(_xs, _ys, 1)
+                                _k, _b = np.polyfit(
+                                    np.asarray([s[0] for s in self._motion_samples]),
+                                    np.asarray([s[1] for s in self._motion_samples]), 1)
                                 self._motion_linear = (float(_k), float(_b))
+                            except Exception:
+                                pass
+                        self._motion_samples_y.append((_mny, _cy))
+                        if len(self._motion_samples_y) > 30:
+                            self._motion_samples_y.pop(0)
+                        if len(self._motion_samples_y) >= 3:
+                            try:
+                                _ky, _by = np.polyfit(
+                                    np.asarray([s[0] for s in self._motion_samples_y]),
+                                    np.asarray([s[1] for s in self._motion_samples_y]), 1)
+                                self._motion_linear_y = (float(_ky), float(_by))
                             except Exception:
                                 pass
                         self._last_mini_x = _mnx
                         self._last_screen_cx = _cx
+                        self._last_mini_y = _mny
+                        self._last_screen_cy = _cy
                     else:
-                        # 丢失保持: 用映射估计屏幕中心x(角色在动, 框要跟着)
-                        _est_cx = None
-                        if self._motion_linear is not None:
+                        # 丢失/强跟踪拒帧: 用映射估计屏幕位置(双轴)
+                        if _est_cx is None and self._motion_linear is not None:
                             _est_cx = self._motion_linear[0] * _mnx + self._motion_linear[1]
-                        elif self._last_mini_x is not None and self._last_screen_cx is not None:
+                        elif _est_cx is None and self._last_mini_x is not None and self._last_screen_cx is not None:
                             # 无映射时用增量: 小地图位移 * 经验比例(屏幕宽/地图宽≈1.2)
                             _dmnx = _mnx - self._last_mini_x
                             _est_cx = self._last_screen_cx + _dmnx * frame.shape[1] * 1.2
+                        if _est_cy is None and self._motion_linear_y is not None:
+                            _est_cy = self._motion_linear_y[0] * _mny + self._motion_linear_y[1]
+                        elif _est_cy is None and self._last_mini_y is not None and self._last_screen_cy is not None:
+                            _dmny = _mny - self._last_mini_y
+                            _est_cy = self._last_screen_cy + _dmny * frame.shape[0] * 1.2
                         if _est_cx is not None:
                             _clamp = max(w / 2.0 + 5, min(frame.shape[1] - w / 2.0 - 5, _est_cx))
                             x = float(_clamp - w / 2.0)   # 移到估计的屏幕位置
                             p["motion_state"] = "MOVE"
+                        if _est_cy is not None:
+                            _clamp_y = max(h / 2.0 + 5, min(frame.shape[0] - h / 2.0 - 5, _est_cy))
+                            y = float(_clamp_y - h / 2.0)
                 # ---- 玩家框EMA平滑(抗黄框抖动) ----
                 # color_anchor 每帧检测有 1~2px 抖动, 直接显示会闪。运动自适应:
                 # 移动时弱平滑(alpha 高, 快速跟随), 静止时强平滑(alpha 低, 框稳)。
