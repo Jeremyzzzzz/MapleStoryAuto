@@ -6313,6 +6313,8 @@ def main():
     cfg = load_config(args.cfg)
     overlay_cfg = cfg["perception_overlay"]
     auto_cfg = cfg.get("auto_combat", {})
+    # 【预测框过滤开关】: PREDICTED(带P)框不作为怪物目标(用户反馈这些全是误检)
+    _ignore_pred_tracks = bool(auto_cfg.get("ignore_predicted_tracks", True))
     # Multi-character support: apply the character profile (key bindings +
     # attack range) for the given --player-name, so one script works for any
     # character. CLI overrides below still win over the profile.
@@ -6691,6 +6693,12 @@ def main():
                     dets = _codex_attach(dets, {"center_px": player["center_px"]})
                 out = []
                 for d in dets:
+                    # 【预测框过滤(用户反馈: 误检全是带P的predict框)】:
+                    # tracking_state=PREDICTED 是跟踪器在怪丢失后按最后位置
+                    # 预测的保持框, 不是真实检测——当真实怪目标打它=打空气/
+                    # 攻击不存在的东西。默认忽略(ignore_predicted_tracks=true)。
+                    if _ignore_pred_tracks and d.get("tracking_state") == "PREDICTED":
+                        continue
                     _bx = d["box"]
                     _bw = int(_bx[2])
                     _bh = int(_bx[3])
