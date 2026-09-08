@@ -1,11 +1,12 @@
 @echo off
-title 冒险岛自动打鳄鱼 - 纯点位巡航模式 (v11.0)
+title 冒险岛自动打鳄鱼 - 纯点位巡航模式 (v11.1)
 cd /d "%~dp0"
 echo ============================================
-echo   冒险岛自动打鳄鱼 v11.0 (点位巡航 + 顺路打怪, 沼泽地2)
-echo   怪物检测: YOLO 鳄鱼(crocodile_v2_hardneg) 单模型
+echo   冒险岛自动打鳄鱼 v11.1 (点位巡航 + 顺路打怪, 沼泽地2)
+echo   怪物检测: YOLO 鳄鱼(crocodile_v2_hardneg) conf=0.17
 echo   玩家定位: color_anchor 色块锚点 (no-ocr)
-echo   其他玩家: 小地图红点检测 (检测到即挂机, 消失2秒自动恢复)
+echo   顺路打怪范围: ±500px   扣血立即反击: 已恢复
+echo   其他玩家: 红点检测(已关闭挂机暂停)
 echo   安全点: 每小时第18/38/58分进商城2分钟(测谎规避), 恢复路线自动走回
 echo   热键: F1 开始录制 / F2 打普通点 / F3 打跳跃点
 echo         F4 保存并开始巡航 / F5 清空录制 / F8 暂停恢复
@@ -21,8 +22,8 @@ del /Q "%TEMP%\auto_combat_ms.lock" >nul 2>&1
 echo [2/2] 启动 bot...
 set "PY=C:\quant_lab\lstm_gpu_venv\Scripts\python.exe"
 if not exist "%PY%" set "PY=python"
-"%PY%" tools\auto_combat.py --cfg shanda_legacy --monster-backend yolo --yolo-model training_runs\crocodile_v2_hardneg_20260908\weights\best.pt --yolo-confidence 0.07 --yolo-iou 0.70 --yolo-image-size 1280 --no-color-verify --show-viz --no-ocr --no-capture --player-name 麻超圆 --fps-limit 12 --monster-labels crocodile --no-terrain --mode minimap_patrol --map-name "沼泽地2"
+"%PY%" tools\auto_combat.py --cfg shanda_legacy --monster-backend yolo --yolo-model training_runs\crocodile_v2_hardneg_20260908\weights\best.pt --yolo-confidence 0.17 --yolo-iou 0.70 --yolo-image-size 1280 --no-color-verify --show-viz --no-ocr --no-capture --player-name 麻超圆 --fps-limit 12 --monster-labels crocodile --no-terrain --mode minimap_patrol --map-name "沼泽地2"
 echo.
-echo 切回野猪版: 把上面一行改成 --yolo-model training_runs\wild_boar_real_hardneg_v4_960\weights\best.pt --yolo-image-size 960 --monster-labels wild_boar --map-name "野猪的领土！！" 并把 config 里 stump_model 填回树妖模型
+echo 切回野猪版: --yolo-model training_runs\wild_boar_real_hardneg_v4_960\weights\best.pt --yolo-confidence 0.07 --yolo-image-size 960 --monster-labels wild_boar --map-name "野猪的领土！！" 并把 config 中 yolo_confidence/patrol_hunt_range_px 改回、stump_model 填回树妖模型
 echo 脚本已退出, 按任意键关闭窗口
 pause >nul
