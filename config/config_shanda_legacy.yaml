@@ -225,8 +225,8 @@ combat_advisory:
 
 # Auto combat loop (tools/auto_combat.py) tuning.
 auto_combat:
-  attack_cooldown_min: 0.10     # 攻击间隔下限(秒) (2026-09-08 攻速降低0.5倍: 0.05→0.10)
-  attack_cooldown_max: 0.20     # 攻击间隔上限(秒) (2026-09-08 攻速降低0.5倍: 0.10→0.20)
+  attack_cooldown_min: 0.05     # 攻击间隔下限(秒) (2026-09-08 攻速恢复: 0.10→0.05 提高一倍)
+  attack_cooldown_max: 0.10     # 攻击间隔上限(秒) (2026-09-08 攻速恢复: 0.20→0.10 提高一倍)
   attack_hold_seconds: 0.05     # hold duration for attack key press
   turn_hold_seconds: 0.08      # 攻击前转向按键时长: 15ms 太短游戏来不及转身就攻击(朝无怪方向空耗蓝); 80ms 足够转身又不至于走一步
   turn_pause_seconds: 0.05     # 转向后攻击前的停顿(确保转身生效)
