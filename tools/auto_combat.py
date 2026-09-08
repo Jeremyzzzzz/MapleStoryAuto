@@ -642,14 +642,13 @@ class CombatPolicy:
                         knocked_back = True
             self._last_vx = vx
 
-        # 【扣血立即反击(2026-09-08 恢复, 覆盖 08-30 的禁用)】: HP 掉血(血条
-        # 读数下降)或方向突变(被击退)任一发生 -> 立即反击, 不依赖置信度
-        # (玩家框不可信时仅跳过方向突变反击, 见下)。hp_dropped 由上方 2 次
-        # 读数取最小判定。
+        # 【扣血反击已禁用(2026-09-08 二次禁用)】: 只保留方向突变(knocked_back)
+        # 触发反击; hp_dropped(血条读数下降)不再触发——配合高置信度阈值,
+        # 防止鳄鱼持续咬导致的频繁吸血反击。hp_dropped 计算保留(供日志)。
         # 【安全点/恢复路线行程中禁反击】: 走路期间被怪撞也不反击(反击会
         # 转向/位移, 打断行程导致走不到安全点/恢复点)。
         # 【安全点"快速到位"禁反击】: 到点后直奔最后一个巡游点, 同样不还手。
-        if ((knocked_back or hp_dropped)
+        if (knocked_back
                 and not (self._safe_active or self._recall_active
                          or self._wp_hunt_suppressed)
                 and now - self._last_counter_at >= 0.15):
@@ -661,10 +660,8 @@ class CombatPolicy:
             # (置信度约0.55), 若仍按飘偏位置计算方向反击, 会把角色打到
             # 错误方向掉下格子。因此【方向突变触发的反击】在玩家置信度
             # < attack_min_player_confidence 时禁止(此时框不可信)。
-            # 【扣血反击不受限】(2026-09-08 恢复): HP 掉血是真受伤,
-            # 不管框飘不飘都还手。
             _counter_conf = float(player.get("score", 0.0) or 0.0) if player else 0.0
-            if _counter_conf < self.attack_min_player_confidence and not hp_dropped:
+            if _counter_conf < self.attack_min_player_confidence:
                 # 跳跃/下落时玩家框飘偏(置信度低)的"假击退": 不反击,
                 # 也不记录方向, 直接跳过本次反击(继续正常巡航/跳跃)。
                 self._last_vx = vx  # 保持速度基准, 防下一帧再触发
