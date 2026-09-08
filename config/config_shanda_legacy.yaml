@@ -69,6 +69,9 @@ minimap:
   # 【红点消失自动恢复】: 检测到其他玩家挂机后, 红点消失满此秒数自动恢复巡逻
   # (用户要求: 消失即恢复, 不用手动按F8; 2s只是跨帧确认, 防红点闪烁反复挂机/恢复)
   other_player_resume_seconds: 2.0
+  # 【红点挂机总开关: 2026-09-08 沼泽地2玩家多, 暂时关闭(false)——检测照常显示,
+  # 只是不再因红点暂停挂机; 重新开启请改回 true】
+  other_player_pause_enabled: false
   player_min_pixels: 4
   player_max_pixels: 80
   region: [0, 0, 285, 245]   # top-left minimap area [x, y, w, h]

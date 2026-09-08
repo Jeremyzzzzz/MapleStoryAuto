@@ -7054,6 +7054,10 @@ def main():
     OTHER_PLAYER_RESUME_DELAY = float(
         cfg.get("minimap", {}).get("other_player_resume_seconds", 2.0)
     )  # 红点消失多久自动恢复挂机(用户要求: 消失立即恢复, 2s只是跨帧确认防闪烁)
+    # 红点挂机总开关: 默认true; 沼泽地2玩家多, 用户要求暂时关闭(false)
+    OTHER_PLAYER_PAUSE_ENABLED = bool(
+        cfg.get("minimap", {}).get("other_player_pause_enabled", True)
+    )
     # ---- 安全点定时进商城(测谎仪规避)状态 ----
     # 状态: "" 空闲 / "walk" 走向安全点 / "wait_t" 到点等5s / "wait_esc" 进商城后等10s / "wrap" 收尾
     _safe_state = ""
@@ -7148,37 +7152,41 @@ def main():
             # 小地图稳定坐标: 每帧定位玩家在地图里的左右位置
             mini = _minimap_players.get("player")
             policy._mini = mini
-            if _has_other:
-                _strip_clear_since = None  # 红点在场: 清掉"消失计时"
-                if _strip_first_seen is None:
-                    _strip_first_seen = now
-                    logger.warning(
-                        f"[其他玩家] 检测到小地图红点 {len(_red_dots)} 个"
-                        f"(map_px={[list(p['map_px']) for p in _red_dots]}), "
-                        f"开始挂机(保持喝药, 不攻击/不移动; 红点消失"
-                        f"{OTHER_PLAYER_RESUME_DELAY:.0f}秒后自动恢复)")
-                if not pause_control.player_pause:
-                    pause_control.set_player_pause(True)
-                    logger.warning(
-                        f"[其他玩家] 检测到 {len(_red_dots)} 个红点, 暂停挂机"
-                        f"(红点消失 {OTHER_PLAYER_RESUME_DELAY:.0f} 秒后自动恢复)")
-            else:
-                # 红点消失: 记录消失开始时刻(仅一次), 满 delay 自动恢复
-                # (修复: 旧逻辑每帧清 _strip_clear_since, "消失计时"永远只有1帧,
-                #  自动恢复从未触发, 用户必须手动按 F8)
-                if _strip_first_seen is not None:
-                    _strip_first_seen = None
-                    _strip_clear_since = now
-                    logger.info(
-                        f"[其他玩家] 红点已消失, {OTHER_PLAYER_RESUME_DELAY:.1f} 秒后自动恢复")
-                elif (_strip_clear_since is not None
-                        and pause_control.player_pause
-                        and now - _strip_clear_since >= OTHER_PLAYER_RESUME_DELAY):
-                    pause_control.resume_from_player_pause()
-                    _strip_clear_since = None
-                    logger.warning(
-                        f"[其他玩家] 红点消失已满 {OTHER_PLAYER_RESUME_DELAY:.1f} 秒, "
-                        f"自动恢复挂机")
+            # 【2026-09-08 暂时关闭红点挂机】: 沼泽地2经常遇到其他玩家,
+            # 红点一出现就挂机太频繁——检测照常(红点HUD显示), 但不再
+            # set_player_pause; 重新开启: minimap.other_player_pause_enabled=true
+            if OTHER_PLAYER_PAUSE_ENABLED:
+                if _has_other:
+                    _strip_clear_since = None  # 红点在场: 清掉"消失计时"
+                    if _strip_first_seen is None:
+                        _strip_first_seen = now
+                        logger.warning(
+                            f"[其他玩家] 检测到小地图红点 {len(_red_dots)} 个"
+                            f"(map_px={[list(p['map_px']) for p in _red_dots]}), "
+                            f"开始挂机(保持喝药, 不攻击/不移动; 红点消失"
+                            f"{OTHER_PLAYER_RESUME_DELAY:.0f}秒后自动恢复)")
+                    if not pause_control.player_pause:
+                        pause_control.set_player_pause(True)
+                        logger.warning(
+                            f"[其他玩家] 检测到 {len(_red_dots)} 个红点, 暂停挂机"
+                            f"(红点消失 {OTHER_PLAYER_RESUME_DELAY:.0f} 秒后自动恢复)")
+                else:
+                    # 红点消失: 记录消失开始时刻(仅一次), 满 delay 自动恢复
+                    # (修复: 旧逻辑每帧清 _strip_clear_since, "消失计时"永远只有1帧,
+                    #  自动恢复从未触发, 用户必须手动按 F8)
+                    if _strip_first_seen is not None:
+                        _strip_first_seen = None
+                        _strip_clear_since = now
+                        logger.info(
+                            f"[其他玩家] 红点已消失, {OTHER_PLAYER_RESUME_DELAY:.1f} 秒后自动恢复")
+                    elif (_strip_clear_since is not None
+                            and pause_control.player_pause
+                            and now - _strip_clear_since >= OTHER_PLAYER_RESUME_DELAY):
+                        pause_control.resume_from_player_pause()
+                        _strip_clear_since = None
+                        logger.warning(
+                            f"[其他玩家] 红点消失已满 {OTHER_PLAYER_RESUME_DELAY:.1f} 秒, "
+                            f"自动恢复挂机")
             if hasattr(player_detector, "submit_frame"):
                 player_detector.submit_frame(frame)
             # Pass the player box so band-restricted detectors only scan the

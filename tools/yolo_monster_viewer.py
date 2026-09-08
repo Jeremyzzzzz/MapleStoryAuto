@@ -57,6 +57,7 @@ CLASS_INFO = {
     "thorn_mushroom": {"zh": "刺蘑菇", "display": "THORN MUSHROOM", "color": (255, 180, 40)},
     "pig": {"zh": "肥肥", "display": "PIG", "color": (255, 120, 200)},
     "wild_boar": {"zh": "黑肥肥", "display": "WILD BOAR", "color": (110, 110, 110)},
+    "crocodile": {"zh": "鳄鱼", "display": "CROCODILE", "color": (80, 210, 210)},
 }
 
 LABEL_ALIASES = {
@@ -88,6 +89,9 @@ LABEL_ALIASES = {
     "黑肥肥": "wild_boar",
     "wild_boar": "wild_boar",
     "wild boar": "wild_boar",
+    "鳄鱼": "crocodile",
+    "crocodile": "crocodile",
+    "alligator": "crocodile",
 }
 
 REQUIRED_CLASSES = {
@@ -112,6 +116,7 @@ ENTITY_SHORT_LABELS = {
     "thorn_mushroom": "T-MUSH",
     "pig": "PIG",
     "wild_boar": "W-BOAR",
+    "crocodile": "CROC",
 }
 
 
@@ -1354,13 +1359,15 @@ class ReadOnlyPlayerDetector:
             ]
             if local:
                 proposals = local
+                # 【跟踪锁定: 距离优先】: 屏幕上同时出现多个玩家候选(其他玩家
+                # 的蓝色勋章条同样满足几何特征)时, 选【距上个位置最近】的框,
+                # 不再选置信度最高的——置信度只作极小加权(用户要求: 识别
+                # 不稳定容易把其他玩家识别进去, 位置连续才是自己)。
                 proposals.sort(
                     key=lambda item: (
-                        item["identity_score"]
-                        - 0.0015
-                        * self._location_distance(item["location"], predicted)
+                        self._location_distance(item["location"], predicted)
+                        - 5.0 * item["identity_score"]
                     ),
-                    reverse=True,
                 )
             else:
                 # 跳跃/大幅位移: 称号条移出 local_radius。color_anchor 的红分验证
@@ -1750,7 +1757,12 @@ class ReadOnlyPlayerDetector:
                 nearby.append(candidate)
             if not nearby:
                 return None, "local"
-            nearby.sort(key=lambda item: item["selection_score"], reverse=True)
+            # 【跟踪锁定: 距离优先】(同 color_anchor): 多个候选时选距上次位置
+            # 最近的框——位置连续才是自己, 置信度只作极小加权(防识别到其他玩家)。
+            nearby.sort(key=lambda item: (
+                self._location_distance(item["location"], self.last_location)
+                - 5.0 * item["identity_score"]
+            ))
             # A local candidate must remain identity-consistent with the
             # previous lock.  Do not keep a lock alive merely because some
             # unrelated nearby text clears the relaxed local threshold.
