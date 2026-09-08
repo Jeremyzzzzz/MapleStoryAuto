@@ -242,8 +242,10 @@ auto_combat:
   monster_max_age: 2.0          # max age (s) of async YOLO results before considered stale
   monster_min_interval: 0.08    # min seconds between async YOLO inferences (YOLO仅14ms, 0.08≈12fps匹配codex, 否则跟踪不准)
   yolo_confidence: 0.07         # YOLO conf threshold (2026-08-30 降低: 0.10 野猪漏检, 帧间不稳定; 更低召回优先)
-  # 树妖(木妖/stump)并行检测: 第二 YOLO 模型(与野猪模型同时跑, 结果合并)
-  stump_model: "training_runs/warrior_stump_hardneg_v2_1280/weights/best.pt"
+  # 树妖(木妖/stump)并行检测: 第二 YOLO 模型(与主模型同时跑, 结果合并)
+  # 【2026-09-08 沼泽地2打鳄鱼】: 暂时关闭(填""即不加载; 切回打猪时恢复
+  # 为 training_runs/warrior_stump_hardneg_v2_1280/weights/best.pt)
+  stump_model: ""
   stump_confidence: 0.55        # 树妖 conf(2026-09-01 回调: 0.65 漏检多导致来回走, 0.55 召回优先)
   stump_iou: 0.45               # 树妖 NMS iou
   stump_image_size: 1280        # 树妖输入尺寸

@@ -1,17 +1,15 @@
 @echo off
-title 冒险岛自动打猪 - 纯点位巡航模式 (v10.4)
+title 冒险岛自动打鳄鱼 - 纯点位巡航模式 (v11.0)
 cd /d "%~dp0"
 echo ============================================
-echo   冒险岛自动打猪 v10.4 (点位巡航 + 顺路打怪 + 下跳 + 安全点商城 + 恢复路线)
+echo   冒险岛自动打鳄鱼 v11.0 (点位巡航 + 顺路打怪, 沼泽地2)
+echo   怪物检测: YOLO 鳄鱼(crocodile_v2_hardneg) 单模型
 echo   玩家定位: color_anchor 色块锚点 (no-ocr)
-echo   怪物检测: YOLO 野猪 + 树妖(木妖) 双模型
-echo   其他玩家: 小地图红点检测 (R1/R2, 检测到即挂机, 消失2秒自动恢复)
-echo   安全点: 定时停止打怪走进商城(T), ESC+回车返回, 重置测谎仪
-echo   恢复路线: 退出商城/跌落底层后自动走回巡游线
+echo   其他玩家: 小地图红点检测 (检测到即挂机, 消失2秒自动恢复)
+echo   安全点: 每小时第18/38/58分进商城2分钟(测谎规避), 恢复路线自动走回
 echo   热键: F1 开始录制 / F2 打普通点 / F3 打跳跃点
 echo         F4 保存并开始巡航 / F5 清空录制 / F8 暂停恢复
 echo         F6=点位置定位 F10=安全点录制 F11=恢复路线录制
-echo   录制时大屏会显示录制类型与已录点(画在小地图上)
 echo   使用前请先点游戏窗口聚焦, 日志会显示 游戏聚焦=Y
 echo ============================================
 echo 启动中... (关闭本窗口即停止脚本)
@@ -23,7 +21,8 @@ del /Q "%TEMP%\auto_combat_ms.lock" >nul 2>&1
 echo [2/2] 启动 bot...
 set "PY=C:\quant_lab\lstm_gpu_venv\Scripts\python.exe"
 if not exist "%PY%" set "PY=python"
-"%PY%" tools\auto_combat.py --cfg shanda_legacy --monster-backend yolo --yolo-model training_runs\wild_boar_real_hardneg_v4_960\weights\best.pt --yolo-confidence 0.07 --yolo-iou 0.70 --yolo-image-size 960 --no-color-verify --show-viz --no-ocr --no-capture --player-name 麻超圆 --fps-limit 12 --monster-labels wild_boar --no-terrain --mode minimap_patrol --map-name "野猪的领土！！"
+"%PY%" tools\auto_combat.py --cfg shanda_legacy --monster-backend yolo --yolo-model training_runs\crocodile_v2_hardneg_20260908\weights\best.pt --yolo-confidence 0.07 --yolo-iou 0.70 --yolo-image-size 1280 --no-color-verify --show-viz --no-ocr --no-capture --player-name 麻超圆 --fps-limit 12 --monster-labels crocodile --no-terrain --mode minimap_patrol --map-name "沼泽地2"
 echo.
+echo 切回野猪版: 把上面一行改成 --yolo-model training_runs\wild_boar_real_hardneg_v4_960\weights\best.pt --yolo-image-size 960 --monster-labels wild_boar --map-name "野猪的领土！！" 并把 config 里 stump_model 填回树妖模型
 echo 脚本已退出, 按任意键关闭窗口
 pause >nul
