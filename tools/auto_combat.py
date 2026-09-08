@@ -7352,12 +7352,21 @@ def main():
                         _idm_str = f" 检测={player['identity_mode']}"
                         if _rf is not None:
                             _idm_str += f"(红{_rf:.2f})"
+                    # 怪物检测置信度统计(YOLO框置信度中位数, 观察漏检/误检调 conf)
+                    _conf_str = ""
+                    if cached_monsters:
+                        _confs = [float(m["confidence"]) for m in cached_monsters
+                                  if m.get("confidence") is not None]
+                        if _confs:
+                            _conf_str = (
+                                f" 怪置信度中位={float(np.median(_confs)):.3f}"
+                                f"(n={len(_confs)})")
                     logger.info(
                         f"[status] HP={_hp_cur}/{_hp_max} 怪物数={len(cached_monsters)} "
                         f"命令={command}/{reason} FPS={measured_fps:.1f} 坐标={_pc_s} "
                         f"vx={_vel[0]:.0f} 大方向={policy.patrol_direction} 意图={policy._last_move_dir}"
                         f" 游戏聚焦={'Y' if target_is_foreground(cfg['game_window']['title']) else 'N'}{_mini_norm_str}"
-                        f"{_box_str}{_mm_str}{_wing_str}{_idm_str}")
+                        f"{_box_str}{_mm_str}{_wing_str}{_idm_str}{_conf_str}")
                     last_state_log = now
             last_reason = reason
             # --no-attack: never engage monsters. Force the reason into the
