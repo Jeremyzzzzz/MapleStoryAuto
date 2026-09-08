@@ -7355,8 +7355,8 @@ def main():
                     # 怪物检测置信度统计(YOLO框置信度中位数, 观察漏检/误检调 conf)
                     _conf_str = ""
                     if cached_monsters:
-                        _confs = [float(m["confidence"]) for m in cached_monsters
-                                  if m.get("confidence") is not None]
+                        _confs = [float(m["score"]) for m in cached_monsters
+                                  if m.get("score") is not None]
                         if _confs:
                             _conf_str = (
                                 f" 怪置信度中位={float(np.median(_confs)):.3f}"

@@ -237,6 +237,12 @@ class YoloMonsterViewerTests(unittest.TestCase):
     def test_wooden_stump_chinese_alias_maps_to_stump(self):
         self.assertEqual(normalize_label("木妖"), "stump")
 
+    def test_crocodile_chinese_alias_maps_to_model_class(self):
+        self.assertEqual(normalize_label("鳄鱼"), "crocodile")
+
+    def test_accepts_dedicated_crocodile_model(self):
+        validate_model_classes({0: "crocodile"}, {"crocodile"})
+
     def test_rejects_model_missing_new_mushroom_classes(self):
         names = {
             0: "stump",

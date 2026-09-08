@@ -244,7 +244,7 @@ auto_combat:
   ocr_max_age: 8.0              # OCR 结果有效期(秒);OCR推理约2-9秒一次,结果需覆盖到下一次刷新
   monster_max_age: 2.0          # max age (s) of async YOLO results before considered stale
   monster_min_interval: 0.08    # min seconds between async YOLO inferences (YOLO仅14ms, 0.08≈12fps匹配codex, 否则跟踪不准)
-  yolo_confidence: 0.17        # YOLO conf threshold (2026-09-08 沼泽地2鳄鱼 0.07→0.17 提高0.1, 降误检; 打猪时改回0.07)
+  yolo_confidence: 0.25        # YOLO conf threshold (2026-09-08 沼泽地2鳄鱼: 0.07→0.17→0.25; 误检仍多可升0.30, 打猪时改回0.07)
   # 树妖(木妖/stump)并行检测: 第二 YOLO 模型(与主模型同时跑, 结果合并)
   # 【2026-09-08 沼泽地2打鳄鱼】: 暂时关闭(填""即不加载; 切回打猪时恢复
   # 为 training_runs/warrior_stump_hardneg_v2_1280/weights/best.pt)
