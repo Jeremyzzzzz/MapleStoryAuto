@@ -6391,6 +6391,18 @@ def main():
             color_anchor_min_red_fraction=float(
                 _overlay.get("player_color_anchor_min_red_fraction", 0.02)
             ),
+            # 以下参数以前没传, 一直吃 ReadOnlyPlayerDetector 的默认值 —— 配置
+            # 文件里改了也不生效(默认值恰好等于当时的调参值所以没暴露)。补齐:
+            color_anchor_local_radius=float(
+                _overlay.get("player_color_anchor_local_radius", 260.0)),
+            color_anchor_color_tol=float(
+                _overlay.get("player_color_anchor_color_tol", 80.0)),
+            color_anchor_ref_path=_overlay.get("player_color_anchor_ref_file"),
+            color_anchor_left_mask_bottom=float(
+                _overlay.get("player_color_anchor_left_mask_bottom", 250.0)),
+            # 名字字形权重: 用本人名字"麻超圆"字形分区分其他玩家的同款勋章条
+            name_glyph_weight=float(
+                _overlay.get("player_name_glyph_weight", 200.0)),
         )
         _codex_ocr = None
         if _codex_ocr_enabled:

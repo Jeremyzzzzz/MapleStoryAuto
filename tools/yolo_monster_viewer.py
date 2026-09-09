@@ -1084,6 +1084,7 @@ class ReadOnlyPlayerDetector:
         color_anchor_color_tol=80.0,
         color_anchor_ref_path=None,
         color_anchor_left_mask_bottom=250.0,
+        name_glyph_weight=200.0,
         keep_color_anchor_misses=6,
     ):
         resolved = Path(template_path)
@@ -1121,6 +1122,12 @@ class ReadOnlyPlayerDetector:
         self.color_anchor_color_tol = float(color_anchor_color_tol)
         # 左上角小地图屏蔽区高度(参考1370宽): 只屏蔽该矩形, 不切整条左侧竖带
         self.color_anchor_left_mask_bottom = float(color_anchor_left_mask_bottom)
+        # 名字字形权重: 排序里"本人名字麻超圆"字形分的加成系数(像素当量)。
+        # 本人名字字形分实测 ~0.9, 其他玩家名字 ~0.1~0.4 -> 200 的权重能抵
+        # 约 100~160px 的位置距离, 即"别人离上个位置更近也不会被误锁"。
+        self.name_glyph_weight = float(name_glyph_weight)
+        # 本帧全部蓝条候选(调试/诊断用, 见 _find_color_anchor 末尾)
+        self.last_anchor_proposals = []
         self.keep_color_anchor_misses = int(keep_color_anchor_misses)
         # 【蓝条颜色参照】: 候选称号条的蓝色像素均值必须接近自己勋章蓝(参照图/
         # 名字模板中的蓝像素均值作为冷启动参照, 锁定后按实际蓝条 EMA 微调)。
@@ -1157,6 +1164,17 @@ class ReadOnlyPlayerDetector:
         self.template_glyph = (
             template_gray[self.glyph_slice] >= self.glyph_threshold
         )
+        # 【名字字形验证用的模板】: 归一化相关(均值已减)对"亮暗分布"不敏感,
+        # 实测本人名字 patch 相关 0.43, 全画面中位 0.07 —— 而二值 F1 会被亮
+        # 背景骗(本人 patch 排到 8922/14864 名)。所以名字验证单独用灰度相关。
+        self.name_tmpl_gray = template_gray.astype(np.float32)
+        # 对齐搜索半径(px): 称号条中心推出的名字位置有 ±2~3px 抖动, 对齐后
+        # 本人相关从 0.355 提升到 0.433。
+        self.name_glyph_pad = 3
+        # 相关值 -> 0~1 归一化: (corr - floor) / span, 截断到 [0,1]。
+        # 实测: 本人 0.43 -> 0.92; 其他文字/背景 <=0.30 -> <=0.4。
+        self.name_glyph_floor = 0.20
+        self.name_glyph_span = 0.25
         self.last_location = None
         self.identity_misses = 0
         self.anchor_template = None
@@ -1422,6 +1440,16 @@ class ReadOnlyPlayerDetector:
             shape_score = min(1.0, fill / 0.35)
             red_score = min(1.0, red_fraction / 0.12)
             identity_score = 0.65 * shape_score + 0.35 * red_score
+            # 【名字字形分】: 勋章条上方 color_anchor_name_offset_y 处应有
+            # "麻超圆"白色名字牌。其他玩家的勋章条颜色/几何完全一样(同款勋章),
+            # 只有名字不同——多候选时用字形分(与离线名字模板的归一化相关)
+            # 优先选自己的。不拒绝低分候选(跳跃/遮挡时字形会糊), 只影响排序。
+            _name_glyph = 0.0
+            try:
+                _name_glyph = float(
+                    self._name_plate_score(gameplay, name_location))
+            except Exception:
+                _name_glyph = 0.0
             proposals.append(
                 {
                     "location": name_location,
@@ -1431,9 +1459,11 @@ class ReadOnlyPlayerDetector:
                     "anchor_box": [x, y, box_width, box_height],
                     "red_fraction": float(red_fraction),
                     "blue_bgr": strip_blue,
+                    "name_glyph": float(_name_glyph),
                 }
             )
         if not proposals:
+            self.last_anchor_proposals = []
             return None
         if self.last_location is not None:
             predicted = (
@@ -1453,10 +1483,16 @@ class ReadOnlyPlayerDetector:
                 # 的蓝色勋章条同样满足几何特征)时, 选【距上个位置最近】的框,
                 # 不再选置信度最高的——置信度只作极小加权(用户要求: 识别
                 # 不稳定容易把其他玩家识别进去, 位置连续才是自己)。
+                # 【名字字形验证】: 别人的玩家框蓝色勋章条与本人完全相同, 光靠
+                # 位置/颜色无法区分。名字牌(勋章条上方 41x23 区域)用本人名字
+                # 模板算字形相似度 name_glyph(0~1): 本人名字"麻超圆"三个字
+                # 命中时分数高, 其他玩家名字(如"张三")分数低。加权进排序后,
+                # 即使别的玩家离上个位置更近, 也不会被误锁定。
                 proposals.sort(
                     key=lambda item: (
                         self._location_distance(item["location"], predicted)
                         - 5.0 * item["identity_score"]
+                        - self.name_glyph_weight * item.get("name_glyph", 0.0)
                     ),
                 )
             else:
@@ -1464,11 +1500,27 @@ class ReadOnlyPlayerDetector:
                 # (下方有红色身体特征)已过滤 UI/背景, 全局选依然安全——不能因此
                 # 放弃 color_anchor 回退到模板匹配(模板匹配名字框不稳定, 会卡背景)。
                 # 下方"远处+低分拒绝"仍兜底, 防止跳跃瞬间误跳远处低分候选。
+                # 全局选择(无位置先验)时没有"离上个位置最近"这个线索, 名字
+                # 字形分在这里只作小幅加成(0.3), 身份分(几何+红分)仍是主项。
                 proposals.sort(
-                    key=lambda item: item["identity_score"], reverse=True)
+                    key=lambda item: (
+                        item["identity_score"]
+                        + 0.3 * item.get("name_glyph", 0.0)
+                    ),
+                    reverse=True,
+                )
         else:
-            proposals.sort(key=lambda item: item["identity_score"], reverse=True)
+            proposals.sort(
+                key=lambda item: (
+                    item["identity_score"]
+                    + 0.3 * item.get("name_glyph", 0.0)
+                ),
+                reverse=True,
+            )
         best = proposals[0]
+        # 调试用: 保留本帧全部蓝条候选(含 name_glyph 字形分), 便于日志/离线核对
+        # "为什么选中了这条"——排序键 = 位置距离 - 5*身份分 - 权重*名字字形分。
+        self.last_anchor_proposals = proposals
         if (
             self.last_location is not None
             and self._location_distance(best["location"], self.last_location)
@@ -1732,6 +1784,43 @@ class ReadOnlyPlayerDetector:
         if denominator == 0:
             return 1.0
         return 2.0 * intersection / denominator
+
+    def _name_plate_score(self, gameplay, location):
+        """名字字形分(0~1): 在 location 附近 ±pad 对齐后, 名字框区域与本人名字
+        模板"麻超圆"做归一化灰度相关(TM_CCOEFF_NORMED, 均值已减)。
+
+        为什么不用 _glyph_score(二值 F1): 实测全画面 14864 个 41x23 patch 里,
+        二值 F1 的中位数(0.574)比本人名字(0.525)还高——亮背景(沼泽灰蓝雾/白
+        瀑布)白像素多, 与任何字形模板的 F1 都高, 完全不能区分。归一化相关减掉
+        均值后, 纯亮/纯暗区域得 0, 只有真正相似的笔画结构才高: 本人 0.43(排名
+        1/14775), 其他文字/背景 ≤0.39(中位 0.07)。
+
+        返回值只影响候选排序, 不做拒绝——跳跃/宠物遮挡导致名字糊掉时降级为
+        纯位置+身份分排序, 不会因为字形低就丢框。
+        """
+        if gameplay is None or gameplay.size == 0:
+            return 0.0
+        tag_height, tag_width = self.template.shape[:2]
+        pad = self.name_glyph_pad
+        x0 = int(round(location[0])) - pad
+        y0 = int(round(location[1])) - pad
+        x1 = x0 + tag_width + 2 * pad
+        y1 = y0 + tag_height + 2 * pad
+        height, width = gameplay.shape[:2]
+        if x0 < 0 or y0 < 0 or x1 > width or y1 > height:
+            return 0.0
+        region = cv2.cvtColor(gameplay[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+        result = cv2.matchTemplate(
+            region.astype(np.float32),
+            self.name_tmpl_gray,
+            cv2.TM_CCOEFF_NORMED,
+        )
+        if result.size == 0:
+            return 0.0
+        result = np.nan_to_num(result, nan=0.0, posinf=0.0, neginf=0.0)
+        corr = float(result.max())
+        score = (corr - self.name_glyph_floor) / self.name_glyph_span
+        return float(min(1.0, max(0.0, score)))
 
     def _glyph_score(self, patch):
         patch_gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
@@ -2968,6 +3057,8 @@ def main():
             color_anchor_ref_path=overlay_cfg.get("player_color_anchor_ref_file"),
             color_anchor_left_mask_bottom=float(
                 overlay_cfg.get("player_color_anchor_left_mask_bottom", 250.0)),
+            name_glyph_weight=float(
+                overlay_cfg.get("player_name_glyph_weight", 200.0)),
         )
         if (
             args.player_name
