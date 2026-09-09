@@ -6400,9 +6400,11 @@ def main():
             color_anchor_ref_path=_overlay.get("player_color_anchor_ref_file"),
             color_anchor_left_mask_bottom=float(
                 _overlay.get("player_color_anchor_left_mask_bottom", 250.0)),
-            # 名字字形权重: 用本人名字"麻超圆"字形分区分其他玩家的同款勋章条
-            name_glyph_weight=float(
-                _overlay.get("player_name_glyph_weight", 200.0)),
+            # 名字字形验证: 用本人名字"麻超圆"字形分区分其他玩家的同款勋章条
+            name_glyph_min=float(
+                _overlay.get("player_name_glyph_min", 0.60)),
+            name_glyph_margin=float(
+                _overlay.get("player_name_glyph_margin", 0.10)),
         )
         _codex_ocr = None
         if _codex_ocr_enabled:
