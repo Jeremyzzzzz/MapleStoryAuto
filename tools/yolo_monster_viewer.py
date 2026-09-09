@@ -1211,6 +1211,52 @@ class ReadOnlyPlayerDetector:
             return None
         return tuple(float(v) for v in patch_bgr[mask > 0].reshape(-1, 3).mean(axis=0))
 
+    @staticmethod
+    def _row_strip_candidates(mask, width, min_row_px=None, min_h=8, max_h=28,
+                              min_w=50, max_w=180, min_fill=0.25):
+        """行投影找"实心横条"候选: 连续 min_h~max_h 行且每行蓝像素 >= 阈值。
+
+        不依赖形态学连通域——背景零散蓝像素无法形成连续高密度行段, 因此
+        即使 CLOSE 把称号条与背景桥接成巨块, 这里仍能独立找回称号条。
+        返回 [[x, y, w, h], ...]。
+        """
+        if mask is None or mask.size == 0:
+            return []
+        if min_row_px is None:
+            # 每行最少蓝像素(参考1370宽): 35——称号条白色文字所在行只剩 ~38
+            # 个蓝像素, 阈值 45 会把这些行判为"非条行"导致行段断裂(实测)。
+            # 背景零散蓝像素行通常 <20, 35 仍能滤掉。
+            min_row_px = max(25, int(round(width * 35.0 / 1370.0)))
+        counts = (mask > 0).sum(axis=1)
+        out = []
+        h_img = counts.shape[0]
+        y = 0
+        while y < h_img:
+            if counts[y] < min_row_px:
+                y += 1
+                continue
+            y0 = y
+            while y < h_img and counts[y] >= min_row_px:
+                y += 1
+            y1 = y
+            h = y1 - y0
+            if not (min_h <= h <= max_h):
+                continue
+            band = mask[y0:y1]
+            cols = (band > 0).sum(axis=0)
+            xs = np.nonzero(cols)[0]
+            if xs.size == 0:
+                continue
+            x0, x1 = int(xs[0]), int(xs[-1]) + 1
+            w = x1 - x0
+            if not (min_w <= w <= max_w):
+                continue
+            area = int((band[:, x0:x1] > 0).sum())
+            if area / float(max(1, w * h)) < min_fill:
+                continue
+            out.append([x0, y0, w, h])
+        return out
+
     def _find_color_anchor(self, gameplay):
         """Find the player's long blue title strip without OCR.
 
@@ -1234,6 +1280,27 @@ class ReadOnlyPlayerDetector:
         mask[:mm_bottom, :left_cut] = 0
         if self.max_valid_y is not None:
             mask[int(self.max_valid_y) + 1 :] = 0
+        # 【行投影候选(抗背景桥接)】: 保存形态学前的原始 mask——CLOSE(21,3)
+        # 会把称号条与背景零散蓝点横向桥接成巨块(实测沼泽地2: 97x13 的称号条
+        # 被连成 184x126, 因 h>30 被丢弃 -> color_anchor 失效)。行投影要求
+        # "连续 8~28 行、每行 >=45 个蓝像素", 背景零散像素无法满足。
+        mask_raw = mask.copy()
+        row_strips = self._row_strip_candidates(mask_raw, width)
+        # 【先清背景零散小噪点】: 沼泽地2 的灰蓝云雾含大量 1~5px 的孤立蓝点,
+        # CLOSE(21,3) 会把它们与称号条横向桥接成巨块(实测: 97x13 的称号条
+        # 被连成 184x126, 因 h>30 被丢弃 -> color_anchor 失效)。先把面积
+        # <12px 的连通域删掉, 再做强桥接(桥接仍用于拼接被白字/宠物切开的
+        # 称号条碎片)。
+        _n0, _lab0, _st0, _ = cv2.connectedComponentsWithStats(mask, 8)
+        _min_area = max(8, int(round(width * 12.0 / 1370.0)))
+        _clean = np.zeros_like(mask)
+        for _i in range(1, _n0):
+            if int(_st0[_i, cv2.CC_STAT_AREA]) >= _min_area:
+                _clean[_lab0 == _i] = 255
+        mask = _clean
+        # 行投影候选(抗桥接兜底): 形态学前保存, 供 _row_strip_candidates 用
+        mask_raw = mask.copy()
+        row_strips = self._row_strip_candidates(mask_raw, width)
         mask = cv2.morphologyEx(
             mask,
             cv2.MORPH_CLOSE,
@@ -1273,7 +1340,17 @@ class ReadOnlyPlayerDetector:
                     break
             if not placed:
                 merged.append(list(b))
-        stats_eff = merged  # 合并后的伪 stats: [x, y, w, h]
+        # 连通域合并候选 + 行投影候选(去重: 中心距 <12 且尺寸相近视为同一条)
+        stats_eff = list(merged)
+        for rb in row_strips:
+            _dup = False
+            for mb in stats_eff:
+                if (abs((rb[0] + rb[2] / 2.0) - (mb[0] + mb[2] / 2.0)) < 12
+                        and abs((rb[1] + rb[3] / 2.0) - (mb[1] + mb[3] / 2.0)) < 12):
+                    _dup = True
+                    break
+            if not _dup:
+                stats_eff.append(rb)  # 伪 stats: [x, y, w, h]
         tag_height, tag_width = self.template.shape[:2]
         proposals = []
         for (x, y, box_width, box_height) in stats_eff:
