@@ -1083,6 +1083,7 @@ class ReadOnlyPlayerDetector:
         color_anchor_local_radius=260.0,
         color_anchor_color_tol=80.0,
         color_anchor_ref_path=None,
+        color_anchor_left_mask_bottom=250.0,
         keep_color_anchor_misses=6,
     ):
         resolved = Path(template_path)
@@ -1118,6 +1119,8 @@ class ReadOnlyPlayerDetector:
         self.color_anchor_min_red_fraction = float(color_anchor_min_red_fraction)
         self.color_anchor_local_radius = float(color_anchor_local_radius)
         self.color_anchor_color_tol = float(color_anchor_color_tol)
+        # 左上角小地图屏蔽区高度(参考1370宽): 只屏蔽该矩形, 不切整条左侧竖带
+        self.color_anchor_left_mask_bottom = float(color_anchor_left_mask_bottom)
         self.keep_color_anchor_misses = int(keep_color_anchor_misses)
         # 【蓝条颜色参照】: 候选称号条的蓝色像素均值必须接近自己勋章蓝(参照图/
         # 名字模板中的蓝像素均值作为冷启动参照, 锁定后按实际蓝条 EMA 微调)。
@@ -1220,10 +1223,15 @@ class ReadOnlyPlayerDetector:
         height, width = gameplay.shape[:2]
         hsv = cv2.cvtColor(gameplay, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, (90, 80, 50), (135, 255, 255))
-        # The minimap and bottom HUD contain many blue pixels but cannot be a
-        # title strip. Keep the exclusion relative to the 1370px reference.
+        # 【只屏蔽小地图矩形区, 不再整条左侧竖带】: 原实现把 x<160 整条竖带
+        # 清零(排除左上角小地图), 但角色走到画面最左下方时称号条也在 x<160,
+        # 会被误屏蔽 -> color_anchor MISS -> 框丢失/回退/瞬移(实测: 角色在最左
+        # 时左侧 4363 个蓝条像素全被切掉)。改为只清 x<left_cut 且 y<小地图底部
+        # (参考 1370 宽下约 250px 高) 的矩形。
         left_cut = min(width, max(0, int(round(width * 160.0 / 1370.0))))
-        mask[:, :left_cut] = 0
+        mm_bottom = min(height, max(0, int(round(
+            width * self.color_anchor_left_mask_bottom / 1370.0))))
+        mask[:mm_bottom, :left_cut] = 0
         if self.max_valid_y is not None:
             mask[int(self.max_valid_y) + 1 :] = 0
         mask = cv2.morphologyEx(
@@ -1270,7 +1278,12 @@ class ReadOnlyPlayerDetector:
         proposals = []
         for (x, y, box_width, box_height) in stats_eff:
             area = box_width * box_height
-            if not (80 <= box_width <= 180 and 8 <= box_height <= 28):
+            # 【贴边放宽宽度下限】: 角色走到画面最左/最右时称号条被画面边界
+            # 截断(实测: 玩家贴左边界时称号条 79x13, 因 w<80 被几何拒掉 ->
+            # color_anchor MISS -> 框丢失/瞬移)。贴边候选放宽到 55px。
+            _edge_clip = (x <= 2 or x + box_width >= width - 2)
+            _min_w = 55 if _edge_clip else 80
+            if not (_min_w <= box_width <= 180 and 8 <= box_height <= 28):
                 continue
             if box_width / max(box_height, 1) < 4.0 or area < 180:
                 continue
@@ -1430,7 +1443,9 @@ class ReadOnlyPlayerDetector:
         hsv = cv2.cvtColor(gameplay, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, (90, 80, 50), (135, 255, 255))
         left_cut = min(width, max(0, int(round(width * 160.0 / 1370.0))))
-        mask[:, :left_cut] = 0
+        mm_bottom = min(height, max(0, int(round(
+            width * self.color_anchor_left_mask_bottom / 1370.0))))
+        mask[:mm_bottom, :left_cut] = 0
         if self.max_valid_y is not None:
             mask[int(self.max_valid_y) + 1:] = 0
         mask = cv2.morphologyEx(
@@ -1468,7 +1483,10 @@ class ReadOnlyPlayerDetector:
         proposals = []
         for (x, y, box_width, box_height) in merged:
             area = box_width * box_height
-            if not (80 <= box_width <= 180 and 8 <= box_height <= 28):
+            # 贴边放宽(同 _find_color_anchor): 称号条被画面边界截断时宽不足 80
+            _edge_clip = (x <= 2 or x + box_width >= width - 2)
+            _min_w = 55 if _edge_clip else 80
+            if not (_min_w <= box_width <= 180 and 8 <= box_height <= 28):
                 continue
             if box_width / max(box_height, 1) < 4.0 or area < 300:
                 continue
@@ -2871,6 +2889,8 @@ def main():
                 overlay_cfg.get("player_color_anchor_color_tol", 80.0)
             ),
             color_anchor_ref_path=overlay_cfg.get("player_color_anchor_ref_file"),
+            color_anchor_left_mask_bottom=float(
+                overlay_cfg.get("player_color_anchor_left_mask_bottom", 250.0)),
         )
         if (
             args.player_name
