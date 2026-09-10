@@ -4467,8 +4467,36 @@ class MinimapWaypointPatrol:
     def begin_safe_visit(self):
         return self._begin_trip(self.safe_points)
 
-    def begin_recall(self):
-        return self._begin_trip(self.recall_points)
+    def begin_recall(self, cur_norm=None):
+        """开始恢复行程(走回巡游线)。
+
+        【起点选择 — 2026-09-10 修复】: 恢复路线是从"某一次跌落点"录下来的,
+        第 1 个点往往在【更下层】。人物如果掉在别的位置(不同平台), 原来会一直
+        朝着走不到的第 1 点走 -> 段超时 -> 120s 行程超时取消 -> 冷却后又触发,
+        无限循环(实测野猪地图: 人物 ny=0.5707, 恢复第1点在 ny=0.6765)。
+        现在: 从【与人物当前 Y 同平台(|ΔY|<=recover_y_tol)的第一个恢复点】
+        开始走; 整条恢复路线都没有同平台点 -> 保持从第1点尝试并告警。
+        """
+        if not self._begin_trip(self.recall_points):
+            return False
+        if cur_norm is not None and self.waypoints:
+            _cy = float(cur_norm[1])
+            _start = -1
+            for _i, _p in enumerate(self.waypoints):
+                if abs(float(_p["ny"]) - _cy) <= self.recover_y_tol:
+                    _start = _i
+                    break
+            if _start > 0:
+                logger.info(
+                    f"[恢复路线] 人物Y={_cy:.4f} 与恢复点第{_start + 1}个同平台, "
+                    f"从该点开始走(前 {_start} 个点在别的平台, 走不到)")
+                self.idx = _start
+                self._reset_attempt()
+            elif _start < 0:
+                logger.warning(
+                    f"[恢复路线] 人物Y={_cy:.4f} 与恢复路线任何点都不同平台"
+                    f"(整条约 {len(self.waypoints)} 点), 仍从第1点开始尝试")
+        return True
 
     def _end_trip(self):
         """结束 one-shot 行程(主航线 waypoint_patrol 状态不受影响)。"""
@@ -8146,7 +8174,7 @@ def main():
                         if recall_patrol.recall_points:
                             # 退出商城后人物可能掉到别处(不在巡游点平台):
                             # 走恢复路线回到巡游线
-                            if recall_patrol.begin_recall():
+                            if recall_patrol.begin_recall(mini["map_norm"] if mini else None):
                                 policy._recall_active = True
                                 _recall_state = "walk"
                                 _recall_at = now
@@ -8269,7 +8297,7 @@ def main():
                                   if _wps else None)
                     if (_wp_bottom is not None
                             and _ny > _wp_bottom + recall_below_margin):
-                        if recall_patrol.begin_recall():
+                        if recall_patrol.begin_recall(mini["map_norm"] if mini else None):
                             policy._recall_active = True
                             _recall_state = "walk"
                             _recall_at = now
