@@ -1192,6 +1192,8 @@ class ReadOnlyPlayerDetector:
         self.allow_screen_y = None  # (lo, hi) 或 None
         # 名字原始相关值的时间历史: {(格子x, 格子y): [最近8帧相关值]}
         self._glyph_hist = {}
+        # 名字字形"按候选跟踪"的轨迹: [{"x","y","vals":[...]}], 最多 6 条
+        self._glyph_tracks = []
         self.keep_color_anchor_misses = int(keep_color_anchor_misses)
         # 【蓝条颜色参照】: 候选称号条的蓝色像素均值必须接近自己勋章蓝(参照图/
         # 名字模板中的蓝像素均值作为冷启动参照, 锁定后按实际蓝条 EMA 微调)。
@@ -1526,19 +1528,13 @@ class ReadOnlyPlayerDetector:
             _name_corr = 0.0
             try:
                 _name_corr = float(self._name_plate_corr(gameplay, name_location))
-                # 【时间中位数平滑】: 原始相关值帧间抖动约 ±0.015, 而"本人 vs
-                # 同款勋章的别人"差距只有 ~0.03 —— 不平滑就会来回翻。同一位置
-                # (量化到 40px 格)保留最近 8 帧取中位数, 让比较稳定。
-                _gkey = (int(round(player_center[0] / 40.0)),
-                         int(round(player_center[1] / 40.0)))
-                _ghist = self._glyph_hist.setdefault(_gkey, [])
-                _ghist.append(_name_corr)
-                if len(_ghist) > 8:
-                    _ghist.pop(0)
-                if len(self._glyph_hist) > 60:
-                    for _k in list(self._glyph_hist)[:20]:
-                        self._glyph_hist.pop(_k, None)
-                _name_corr = float(np.median(_ghist))
+                # 【名字字形时间平滑 — 按候选跟踪】(2026-09-10 改进):
+                # 原来按 40px 网格分桶存历史, 人物移动跨桶时历史清零 —— 实测那
+                # 一帧 raw 会掉到 0.34(本人正常 0.70), 恰好被旁边戴同款勋章的
+                # 玩家抢走检测框(用户反馈"黄框跳到别人身上")。
+                # 改成: 每个候选关联到最近的"字形轨迹"(距离<=35px) —— 轨迹跟着
+                # 人走, 跨桶不再清零; 不同玩家各自一条轨迹, 互不污染。
+                _name_corr = self._smooth_glyph(player_center, _name_corr)
                 _name_glyph = float(min(1.0, max(
                     0.0, (_name_corr - self.name_glyph_floor) / self.name_glyph_span)))
             except Exception:
@@ -1945,6 +1941,34 @@ class ReadOnlyPlayerDetector:
         if denominator == 0:
             return 1.0
         return 2.0 * intersection / denominator
+
+    def _smooth_glyph(self, center, corr):
+        """名字字形分的时间平滑(按候选跟踪, 见 _find_color_anchor 注释)。
+
+        每个候选与"最近的既有轨迹"(曼哈顿距离 <= 35px)关联, 用该轨迹最近 10 帧
+        的中位数作为本帧分数; 关联不上就新建一条轨迹。轨迹跟着人物移动, 因此
+        【跨坐标分桶不会清零历史】—— 原来按 40px 网格分桶, 人物一移动跨桶,
+        历史清零, 那一帧 raw 从 0.70 掉到 0.34, 就会被旁边戴同款勋章的玩家抢走。
+        不同玩家各自一条轨迹, 互不污染(超过 35px 才可能关联到同一条)。
+        """
+        tracks = self._glyph_tracks
+        best_i, best_d = -1, 1e9
+        for _i, _t in enumerate(tracks):
+            _d = abs(_t["x"] - float(center[0])) + abs(_t["y"] - float(center[1]))
+            if _d < best_d:
+                best_d, best_i = _d, _i
+        if best_i >= 0 and best_d <= 35.0:
+            _t = tracks[best_i]
+            _t["x"], _t["y"] = float(center[0]), float(center[1])
+            _t["vals"].append(float(corr))
+            if len(_t["vals"]) > 10:
+                _t["vals"].pop(0)
+            return float(np.median(_t["vals"]))
+        tracks.append({"x": float(center[0]), "y": float(center[1]),
+                       "vals": [float(corr)]})
+        if len(tracks) > 6:
+            tracks.pop(0)
+        return float(corr)
 
     def _name_plate_corr(self, gameplay, location):
         """名字牌与本人名字模板的【原始归一化相关值】(不封顶)。

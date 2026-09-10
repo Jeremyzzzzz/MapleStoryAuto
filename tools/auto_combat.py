@@ -6788,17 +6788,31 @@ def main():
                 _model_ok = True
                 if _cv_ref and len(_cv_ref) >= 2 and _cv_w > 0:
                     _rw, _rh = float(_cv_ref[0]), float(_cv_ref[1])
-                    if (abs(_cv_w - _rw) > 0.05 * _rw
-                            or abs(_cv_h - _rh) > 0.05 * _rh):
+                    _mismatch = (abs(_cv_w - _rw) > 0.05 * _rw
+                                 or abs(_cv_h - _rh) > 0.05 * _rh)
+                    # 【防抖】(2026-09-10): 小地图边框检测偶尔会被游戏元素骗到
+                    # —— 实测野猪地图连测 40 帧【全部】是 107x99(与标定一致),
+                    # 但个别帧会报 95x99/100x99。原来"一帧不符就停用模型", 导致
+                    # 模型时开时关: 关的那几秒里别人(同款勋章)就被误检成自己,
+                    # 黄框跳到别人身上(用户反馈)。改成【连续 N 帧不符】才停用。
+                    _bad_prev = int(getattr(self, "_canvas_bad_streak", 0))
+                    self._canvas_bad_streak = (_bad_prev + 1) if _mismatch else 0
+                    if self._canvas_bad_streak >= int(
+                            cfg["perception_overlay"].get(
+                                "camera_canvas_bad_frames", 12)):
                         _model_ok = False
                 if not _model_ok:
                     if not getattr(policy, "_cam_model_warned", False):
                         policy._cam_model_warned = True
                         logger.warning(
                             f"[位置校验] 小地图画布={_cv_w}x{_cv_h} 与标定"
-                            f"{_cv_ref} 不符(换地图/改面板), 本次停用镜头模型")
-                else:
+                            f"{_cv_ref} 连续 {self._canvas_bad_streak} 帧不符"
+                            f"(换地图/改面板), 停用镜头模型")
+                elif getattr(policy, "_cam_model_warned", False):
                     policy._cam_model_warned = False
+                    logger.warning(
+                        f"[位置校验] 小地图画布恢复为 {_cv_w}x{_cv_h}, "
+                        f"镜头模型已重新启用")
                 self._model_ok = _model_ok
                 _veto = []
                 _veto_self_x = None
@@ -6891,7 +6905,11 @@ def main():
                               and not any(_lo <= _rcx <= _hi for _lo, _hi in _allow))
                     if _x_bad or _y_bad:
                         self._cam_reject_streak += 1
-                        if self._cam_reject_streak > 20:
+                        # (2026-09-10) 阈值 20 -> 60: X模型现在稳定启用(左区残差中位3px),
+                        # 连续拒绝通常是"别人站在不同X位置", 不该几秒就把校验停掉 ——
+                        # 暂停窗口里别人恰好会被当成自己(用户反馈的误检来源之一)。
+                        # 60 帧≈5~6 秒连续拒绝才停, 仍保留"模型不适用"的兜底。
+                        if self._cam_reject_streak > 60:
                             # 防呆: 连续拒绝过多说明模型不适用于当前地图/窗口
                             # (例如人物跑到别的地图) -> 暂停校验 10s, 绝不能
                             # 因此把机器人弄瞎。
