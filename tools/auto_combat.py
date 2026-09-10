@@ -4438,12 +4438,16 @@ class MinimapWaypointPatrol:
         return False
 
     def save_safe_points(self, map_name=None):
-        """保存安全点到 minimaps/{地图}/safe_points.json(F10 录制结束时)。"""
+        """保存安全点到 minimaps/{地图}/safe_points.json(F10 录制结束时)。
+
+        【允许空列表】(2026-09-10 用户要求): 空录制 = 清空旧点位(写 [] 覆盖),
+        这样用户连按两次 F10 就能"不用安全点"。
+        """
         try:
             if map_name:
                 self.map_name = map_name
             p = self._safe_path(self.map_name)
-            if not p or not self.safe_points:
+            if not p:
                 return False
             os.makedirs(os.path.dirname(p), exist_ok=True)
             with open(p, "w", encoding="utf-8") as f:
@@ -4546,11 +4550,16 @@ class MinimapWaypointPatrol:
         return False
 
     def save_recall_points(self, map_name=None):
+        """保存恢复路线到 minimaps/{地图}/recall_points.json(F11 录制结束时)。
+
+        【允许空列表】(2026-09-10 用户要求): 空录制 = 清空旧路线(写 [] 覆盖),
+        这样用户连按两次 F11 就能"不用恢复路线"。
+        """
         try:
             if map_name:
                 self.map_name = map_name
             p = self._recall_path(self.map_name)
-            if not p or not self.recall_points:
+            if not p:
                 return False
             os.makedirs(os.path.dirname(p), exist_ok=True)
             with open(p, "w", encoding="utf-8") as f:
@@ -7331,11 +7340,24 @@ def main():
     _lie_last_alarm = 0.0
     _lie_streak = 0        # 连续命中帧数(2帧确认, 防单帧抖动)
 
+    # 【报警音文件】(用户 2026-09-10 选定): 三连升调急报(尖锐、易从游戏音里听出)。
+    # 走系统【波形】音量通道(PlaySound), 比原来的 winsound.Beep(走"哔声"通道)
+    # 明显更响。文件随仓库提交(tools/sounds/), 另一台电脑 git pull 即可同步。
+    _ALARM_WAV = REPO_ROOT / "tools" / "sounds" / "alarm_urgent.wav"
+
     def _play_camera_alarm(beeps=3):
-        """蜂鸣提醒(后台线程, 不阻塞主循环): 提示测谎弹窗可能已出现。"""
+        """报警声(后台线程, 不阻塞主循环): 优先播放 wav; 文件缺失时退回 Beep。"""
         def _beep():
             try:
                 import winsound
+                if _ALARM_WAV.exists():
+                    # SND_ASYNC: 立刻返回, 不卡主循环; 重复 beeps 次
+                    for _i in range(max(1, int(beeps))):
+                        winsound.PlaySound(
+                            str(_ALARM_WAV),
+                            winsound.SND_FILENAME | winsound.SND_ASYNC)
+                        time.sleep(1.1)     # 让每次播完(音长约 0.9s)
+                    return
                 for _i in range(max(1, int(beeps))):
                     winsound.Beep(1200, 220)
                     time.sleep(0.12)
@@ -8143,12 +8165,28 @@ def main():
                     elif waypoint_patrol.is_recording_safe:
                         waypoint_patrol.is_recording_safe = False
                         if not waypoint_patrol.safe_points:
-                            logger.warning("[热键] 安全点保存失败: 没有打点(F2/F3)")
+                            # 【空录制 = 清空】(用户要求 2026-09-10): 连按两次 F10
+                            # 且中间没打点 -> 写空列表覆盖旧安全点, 以后不再触发
+                            # 安全点行程(用户: "不用安全点就用空点覆盖掉以前的")。
+                            if active_map_name and waypoint_patrol.save_safe_points(active_map_name):
+                                waypoint_patrol.load_safe_points(active_map_name)
+                                safe_patrol.load_safe_points(active_map_name)
+                                policy._safe_pending = False
+                                policy._wp_hunt_suppressed = False
+                                logger.warning(
+                                    f"[热键] 安全点已【清空】(空录制覆盖) -> "
+                                    f"minimaps/{active_map_name}/safe_points.json "
+                                    f"= [] , 以后不再走安全点行程")
+                            else:
+                                logger.warning("[热键] 安全点清空失败(无地图名或写入异常)")
                         elif active_map_name and waypoint_patrol.save_safe_points(active_map_name):
                             logger.info(
                                 f"[热键] 安全点已保存 {len(waypoint_patrol.safe_points)} 个 "
                                 f"-> minimaps/{active_map_name}/safe_points.json")
                             waypoint_patrol.load_safe_points(active_map_name)
+                            # 【同步行程实例】: 实际走安全点行程的是 safe_patrol,
+                            # 原来只重载 waypoint_patrol -> 新录的点要重启才生效
+                            safe_patrol.load_safe_points(active_map_name)
                         else:
                             logger.warning("[热键] 安全点保存失败(无地图名或写入异常)")
                     else:
@@ -8168,11 +8206,24 @@ def main():
                     elif waypoint_patrol.is_recording_recall:
                         waypoint_patrol.is_recording_recall = False
                         if not waypoint_patrol.recall_points:
-                            logger.warning("[热键] 恢复路线保存失败: 没有打点(F2/F3)")
+                            # 【空录制 = 清空】(用户要求 2026-09-10): 连按两次 F11
+                            # 且中间没打点 -> 写空列表覆盖旧恢复路线, 以后不再自动
+                            # 走恢复路线(用户: "不用恢复路线就用空点覆盖掉以前的")。
+                            if active_map_name and waypoint_patrol.save_recall_points(active_map_name):
+                                waypoint_patrol.load_recall_points(active_map_name)
+                                recall_patrol.load_recall_points(active_map_name)
+                                logger.warning(
+                                    f"[热键] 恢复路线已【清空】(空录制覆盖) -> "
+                                    f"minimaps/{active_map_name}/recall_points.json "
+                                    f"= [] , 以后不再自动走恢复路线")
+                            else:
+                                logger.warning("[热键] 恢复路线清空失败(无地图名或写入异常)")
                         elif active_map_name and waypoint_patrol.save_recall_points(active_map_name):
                             logger.info(
                                 f"[热键] 恢复路线已保存 {len(waypoint_patrol.recall_points)} 个 "
                                 f"-> minimaps/{active_map_name}/recall_points.json")
+                            waypoint_patrol.load_recall_points(active_map_name)
+                            # 【同步行程实例】: 实际走恢复行程的是 recall_patrol
                             recall_patrol.load_recall_points(active_map_name)
                         else:
                             logger.warning("[热键] 恢复路线保存失败(无地图名或写入异常)")
