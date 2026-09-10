@@ -6201,6 +6201,10 @@ def detect_lie_detector(frame, cfg):
     cy_lo, cy_hi = (acfg.get("center_y") or [0.15, 0.88])[:2]
     ar_lo = float(acfg.get("min_aspect", 0.7))
     ar_hi = float(acfg.get("max_aspect", 2.2))
+    # 【突兀度】: 弹窗与四周的亮度差(用户提示: "这个窗口很突兀, 跟周边颜色不符")。
+    # 实测误报(选择角色界面的羊皮纸书页)就是大片浅米色, 面板与四周一样亮 ->
+    # 差值≈0 被排除; 游戏里真正的弹窗四周是深色场景 -> 差值 100+。
+    min_contrast = float(acfg.get("min_contrast", 45.0))
     pad = (k - 1) // 2
     for i in range(1, n):
         x, y, w, h, area = (int(v) for v in stats[i])
@@ -6220,9 +6224,30 @@ def detect_lie_detector(frame, cfg):
         if not (cx_lo * fw <= bcx <= cx_hi * fw
                 and cy_lo * fh <= bcy <= cy_hi * fh):
             continue
-        inner = gray[by + 6:by + bh - 6, bx + 6:bx + bw - 6]
-        if inner.size and float(inner.std()) > max_std:
+        # 【必须完整在画面内(留 10px 边)】: 弹窗是居中的独立窗口, 不会贴边。
+        # 没有这条时"整屏浅色"会把整个画面当成一块面板(实测: 浅灰面板贴浅灰
+        # 背景 -> 连通域吃到整帧 -> 四周取不到采样 -> 突兀度检查被跳过而误报)。
+        if not (bx >= 10 and by >= 10
+                and bx + bw <= fw - 10 and by + bh <= fh - 10):
             continue
+        inner = gray[by + 6:by + bh - 6, bx + 6:bx + bw - 6]
+        if not inner.size or float(inner.std()) > max_std:
+            continue
+        # 面板四周 5~9px 的一圈(排除面板本身)取中位数, 与面板中位数比亮度差
+        ring = []
+        for (ry0, ry1, rx0, rx1) in (
+                (by - 9, by - 5, bx, bx + bw),
+                (by + bh + 5, by + bh + 9, bx, bx + bw),
+                (by, by + bh, bx - 9, bx - 5),
+                (by, by + bh, bx + bw + 5, bx + bw + 9)):
+            ry0, rx0 = max(0, ry0), max(0, rx0)
+            ry1, rx1 = min(fh, ry1), min(fw, rx1)
+            if ry1 > ry0 and rx1 > rx0:
+                ring.append(gray[ry0:ry1, rx0:rx1].ravel())
+        if ring:
+            ring_med = float(np.median(np.concatenate(ring)))
+            if float(np.median(inner)) - ring_med < min_contrast:
+                continue
         return True, [bx, by, bw, bh]
     return False, None
 
@@ -8519,6 +8544,22 @@ def main():
                 if _lie_streak >= 2:
                     if now - _lie_last_alarm >= lie_alarm_cooldown:
                         _lie_last_alarm = now
+                        # 【误报诊断】: 报警时存一帧到 log/ (带面板框与时刻),
+                        # 下次若发现是误报, 直接看图就知道是什么触发的。
+                        try:
+                            _dbg = frame.copy()
+                            if _lie_box:
+                                cv2.rectangle(
+                                    _dbg, (_lie_box[0], _lie_box[1]),
+                                    (_lie_box[0] + _lie_box[2],
+                                     _lie_box[1] + _lie_box[3]),
+                                    (0, 0, 255), 3)
+                            _dbg_path = (REPO_ROOT / "log" /
+                                         f"lie_alarm_{time.strftime('%Y%m%d_%H%M%S')}.png")
+                            cv2.imencode(".png", _dbg)[1].tofile(str(_dbg_path))
+                            logger.info(f"[测谎弹窗] 已存诊断帧 -> {_dbg_path.name}")
+                        except Exception:
+                            pass
                         _play_camera_alarm(beeps=lie_alarm_beeps)
                         logger.warning(
                             f"[测谎弹窗] 检测到\"谎探测仪\"弹窗! 面板="
