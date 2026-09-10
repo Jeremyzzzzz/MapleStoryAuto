@@ -166,6 +166,11 @@ def resolve_scaled_region(frame_shape, region, reference_width=None):
     return [x, y, width, height]
 
 
+# 小地图画布宽度的时间中位数缓存(见 resolve_minimap_canvas 的稳定器)
+_MINIMAP_CANVAS_HISTORY = {}
+_MINIMAP_CANVAS_OUTLIERS = {}
+
+
 def resolve_minimap_canvas(frame, canvas_box, minimap_cfg):
     """Measure the current minimap content rectangle from its bright UI border."""
     if not minimap_cfg.get("canvas_auto_width", False):
@@ -246,6 +251,38 @@ def resolve_minimap_canvas(frame, canvas_box, minimap_cfg):
     canvas_height = fallback_height if bottom_y is None else bottom_y - canvas_y
     if canvas_height <= 0:
         canvas_height = fallback_height
+    # 【画布尺寸稳定器】(2026-09-09): 边框自动检测会被游戏里的白色元素骗到,
+    # 实测同一会话内画布宽度在 96~182 之间乱跳 —— 画布宽度一变, map_norm 就
+    # 整体缩放失真(同一个像素 x=88 被算成 mx=0.60 或 0.91), 导致 W 拟合、
+    # 位置校验、录的航点全部错位。这里用最近若干次的中位数做参考, 新测量偏离
+    # 超过 15% 视为误检、直接采用中位数(不入库)。
+    key = (frame.shape[1], frame.shape[0], int(canvas_x), int(canvas_y))
+    hist = _MINIMAP_CANVAS_HISTORY.setdefault(key, [])
+    if hist:
+        ref_w_hist = float(np.median(hist))
+        if abs(canvas_width - ref_w_hist) > 0.15 * ref_w_hist:
+            # 连续异常计数: 真的换了尺寸(例如小地图面板被缩放)时不能永远卡在
+            # 旧中位数上 —— 连续 30 次异常就清空历史、以新测量重建。
+            _outliers = _MINIMAP_CANVAS_OUTLIERS.get(key, 0) + 1
+            _MINIMAP_CANVAS_OUTLIERS[key] = _outliers
+            if _outliers >= 30:
+                logger.warning(
+                    f"[小地图] 画布宽度连续30帧异常(新={canvas_width}, 旧中位="
+                    f"{ref_w_hist:.0f}), 重建历史")
+                hist.clear()
+                _MINIMAP_CANVAS_OUTLIERS[key] = 0
+                hist.append(canvas_width)
+            else:
+                logger.debug(
+                    f"[小地图] 画布宽度异常 {canvas_width} -> 用中位 {ref_w_hist:.0f}")
+                canvas_width = int(round(ref_w_hist))
+        else:
+            _MINIMAP_CANVAS_OUTLIERS[key] = 0
+            hist.append(canvas_width)
+            if len(hist) > 40:
+                hist.pop(0)
+    else:
+        hist.append(canvas_width)
     return [canvas_x, canvas_y, canvas_width, canvas_height]
 
 
@@ -1086,6 +1123,8 @@ class ReadOnlyPlayerDetector:
         color_anchor_left_mask_bottom=250.0,
         name_glyph_min=0.60,
         name_glyph_margin=0.10,
+        name_glyph_min_raw=0.45,
+        name_glyph_margin_raw=0.02,
         keep_color_anchor_misses=6,
     ):
         resolved = Path(template_path)
@@ -1131,8 +1170,28 @@ class ReadOnlyPlayerDetector:
         #   仍按位置距离选(避免两个候选都像本人时来回跳)。
         self.name_glyph_min = float(name_glyph_min)
         self.name_glyph_margin = float(name_glyph_margin)
+        # 原始相关值尺度的阈值/容差(见 _find_color_anchor 的"名字身份优先")
+        self.name_glyph_min_raw = float(name_glyph_min_raw)
+        self.name_glyph_margin_raw = float(name_glyph_margin_raw)
         # 本帧全部蓝条候选(调试/诊断用, 见 _find_color_anchor 末尾)
         self.last_anchor_proposals = []
+        # 【红点辅助定位】(用户方案 2026-09-09): 由调用方每帧设置"其他玩家在
+        # 屏幕上的预测 x 区间" [[lo, hi], ...]。候选框中心落在这些区间内 ->
+        # 判为别的玩家, 直接从候选里剔除。相机是共享的, 所以别人与小地图红点
+        # 的屏幕位置满足 屏x_别人 = 屏x_自己 + W*(mx_红点 - mx_自己), 调用方
+        # 用上一帧的可信位置 + 本帧 mx 算出这些区间。
+        self.veto_screen_x = []
+        self.veto_self_x = None    # 本帧自己预测屏幕 x(永不剔除离它最近的候选)
+        self.veto_applied = 0      # 被剔除的候选数(诊断)
+        # 【允许范围过滤】(用户方案 2026-09-09): 由调用方给的"人物允许出现的
+        # 屏幕 X 区间 / Y 范围"直接过滤候选 —— 别人的勋章与本人完全同款、名字
+        # 字形分也会双双饱和到 1.0 时, 位置是唯一可靠的区分依据。把过滤放在
+        # 候选阶段(而不是检测完再否决结果), 避免"每帧先选错人再被拒 -> 连拒
+        # 20帧触发防呆暂停 -> 暂停窗口里又误检"的循环。
+        self.allow_screen_x = []   # [(lo, hi), ...]
+        self.allow_screen_y = None  # (lo, hi) 或 None
+        # 名字原始相关值的时间历史: {(格子x, 格子y): [最近8帧相关值]}
+        self._glyph_hist = {}
         self.keep_color_anchor_misses = int(keep_color_anchor_misses)
         # 【蓝条颜色参照】: 候选称号条的蓝色像素均值必须接近自己勋章蓝(参照图/
         # 名字模板中的蓝像素均值作为冷启动参照, 锁定后按实际蓝条 EMA 微调)。
@@ -1464,11 +1523,27 @@ class ReadOnlyPlayerDetector:
             # 只有名字不同——多候选时用字形分(与离线名字模板的归一化相关)
             # 优先选自己的。不拒绝低分候选(跳跃/遮挡时字形会糊), 只影响排序。
             _name_glyph = 0.0
+            _name_corr = 0.0
             try:
-                _name_glyph = float(
-                    self._name_plate_score(gameplay, name_location))
+                _name_corr = float(self._name_plate_corr(gameplay, name_location))
+                # 【时间中位数平滑】: 原始相关值帧间抖动约 ±0.015, 而"本人 vs
+                # 同款勋章的别人"差距只有 ~0.03 —— 不平滑就会来回翻。同一位置
+                # (量化到 40px 格)保留最近 8 帧取中位数, 让比较稳定。
+                _gkey = (int(round(player_center[0] / 40.0)),
+                         int(round(player_center[1] / 40.0)))
+                _ghist = self._glyph_hist.setdefault(_gkey, [])
+                _ghist.append(_name_corr)
+                if len(_ghist) > 8:
+                    _ghist.pop(0)
+                if len(self._glyph_hist) > 60:
+                    for _k in list(self._glyph_hist)[:20]:
+                        self._glyph_hist.pop(_k, None)
+                _name_corr = float(np.median(_ghist))
+                _name_glyph = float(min(1.0, max(
+                    0.0, (_name_corr - self.name_glyph_floor) / self.name_glyph_span)))
             except Exception:
                 _name_glyph = 0.0
+                _name_corr = 0.0
             proposals.append(
                 {
                     "location": name_location,
@@ -1479,11 +1554,73 @@ class ReadOnlyPlayerDetector:
                     "red_fraction": float(red_fraction),
                     "blue_bgr": strip_blue,
                     "name_glyph": float(_name_glyph),
+                    "name_glyph_raw": float(_name_corr),
+                    # 玩家框中心(与 detect() 返回的 box 中心一致): 供"红点辅助
+                    # 定位"按屏幕 x 否决候选时使用。
+                    "center": (float(player_center[0]), float(player_center[1])),
                 }
             )
         if not proposals:
             self.last_anchor_proposals = []
             return None
+        # 【红点辅助定位】: 先用调用方给的"其他玩家屏幕 x 区间"剔除候选。
+        # 相机共享 -> 别人的屏幕位置可由小地图红点算出; 别人那条勋章与自己
+        # 完全同款, 只有靠位置区分。
+        # 【必须保留自己那条】: 红点离自己很近时 veto 区间会盖住自己, 若把
+        # 自己剔掉、只留下远处的别的玩家, 反而锁错人 —— 所以永远保留离
+        # veto_self_x(调用方给的本帧自己预测位置)最近的候选。
+        if self.veto_screen_x:
+            _self_pred = self.veto_self_x
+            _nearest = None
+            if _self_pred is not None and proposals:
+                _nearest = min(
+                    proposals,
+                    key=lambda _p: abs(float(_p.get("center", (0.0, 0.0))[0])
+                                       - float(_self_pred)))
+            _kept = []
+            _vetoed = 0
+            for _item in proposals:
+                _cx = float(_item.get("center", (0.0, 0.0))[0])
+                if (_item is not _nearest
+                        and any(_lo <= _cx <= _hi for _lo, _hi in self.veto_screen_x)):
+                    _vetoed += 1
+                    continue
+                _kept.append(_item)
+            if _kept:
+                proposals = _kept
+            self.veto_applied = _vetoed
+        # 【允许范围过滤】: 候选中心必须落在调用方给的 X 区间 / Y 范围内。
+        # 保留"离预测位置最近的那条"作为兜底(模型在过渡点可能偏, 不能因为
+        # 全被过滤就把玩家丢了)。
+        if (self.allow_screen_x or self.allow_screen_y) and proposals:
+            _ref = self.veto_self_x
+            if _ref is None and self.allow_screen_x:
+                _ref = sum((_lo + _hi) / 2.0
+                           for _lo, _hi in self.allow_screen_x) / len(self.allow_screen_x)
+            _nearest2 = None
+            if _ref is not None:
+                _nearest2 = min(
+                    proposals,
+                    key=lambda _p: abs(float(_p.get("center", (0.0, 0.0))[0])
+                                       - float(_ref)))
+            _kept2 = []
+            for _item in proposals:
+                _c = _item.get("center", (0.0, 0.0))
+                _cx, _cy = float(_c[0]), float(_c[1])
+                _ok = True
+                if (self.allow_screen_x
+                        and not any(_lo <= _cx <= _hi
+                                    for _lo, _hi in self.allow_screen_x)):
+                    _ok = False
+                if (self.allow_screen_y
+                        and not (float(self.allow_screen_y[0]) <= _cy
+                                 <= float(self.allow_screen_y[1]))):
+                    _ok = False
+                if not _ok and _item is not _nearest2:
+                    continue
+                _kept2.append(_item)
+            if _kept2:
+                proposals = _kept2
         if self.last_location is not None:
             predicted = (
                 float(self.last_location[0] + self.location_velocity[0]),
@@ -1507,15 +1644,20 @@ class ReadOnlyPlayerDetector:
             # 260px 局部半径外就永远抢不回来)。名字被宠物/怪物糊掉(字形分
             # < 阈值)时退回原来的"局部半径 + 距离优先"行为, 不会因为字形低
             # 就丢框。
+            # 【名字身份优先 —— 用原始相关值比较】(用户要求 2026-09-09 修饱和):
+            # 归一化分在 corr>=0.60 就封顶成 1.0, 两个同款勋章玩家双双 1.000
+            # 无法区分; 原始相关值不封顶, 可直接横向比较谁更像本人名字。
+            # 阈值/容差都用原始值尺度(实测本人 0.54~0.58, 打乱字序 0.45~0.50)。
+            _graw = lambda _p: float(_p.get("name_glyph_raw", 0.0))
             confident = [
                 item for item in proposals
-                if item.get("name_glyph", 0.0) >= self.name_glyph_min
+                if _graw(item) >= self.name_glyph_min_raw
             ]
             if confident:
-                _g_max = max(item["name_glyph"] for item in confident)
+                _g_max = max(_graw(item) for item in confident)
                 proposals = [
                     item for item in confident
-                    if item["name_glyph"] >= _g_max - self.name_glyph_margin
+                    if _graw(item) >= _g_max - self.name_glyph_margin_raw
                 ]
             elif local:
                 proposals = local
@@ -1804,25 +1946,12 @@ class ReadOnlyPlayerDetector:
             return 1.0
         return 2.0 * intersection / denominator
 
-    def _name_plate_score(self, gameplay, location):
-        """名字字形分(0~1): 在 location 附近 ±pad 对齐、多尺度搜索后, 名字牌区域
-        与本人名字模板"麻超圆"做归一化灰度相关(TM_CCOEFF_NORMED, 均值已减)。
+    def _name_plate_corr(self, gameplay, location):
+        """名字牌与本人名字模板的【原始归一化相关值】(不封顶)。
 
-        为什么不用 _glyph_score(二值 F1): 实测全画面 14864 个 41x23 patch 里,
-        二值 F1 的中位数(0.574)比本人名字(0.525)还高——亮背景(沼泽灰蓝雾/白
-        瀑布)白像素多, 与任何字形模板的 F1 都高, 完全不能区分。
-
-        为什么必须多尺度: 离线模板与实时画面的名字牌有约 10% 缩放差(同帧
-        1.00 尺度相关 0.372, 1.10 尺度相关 0.540), 只按原始尺度匹配会让本人
-        名字的分数低于别人。
-
-        实测判别力(真实帧, 多尺度+对齐):
-          本人名字牌      0.54~0.58
-          同牌打乱字序    0.45~0.50   (其他玩家名字的最坏上界)
-          随机笔画假名字牌 0.31
-
-        返回值只影响候选排序, 不做拒绝——跳跃/宠物遮挡导致名字糊掉时降级为
-        纯位置+身份分排序, 不会因为字形低就丢框。
+        为什么要暴露原始值: 归一化分 (corr-0.35)/0.25 在 corr>=0.60 就封顶成
+        1.0 —— 实测同一帧里两个戴同款勋章的玩家双双拿到 1.000, 名字完全失去
+        区分力(用户 2026-09-09 发现)。原始值不封顶, 可以直接横向比较谁更像。
         """
         if gameplay is None or gameplay.size == 0:
             return 0.0
@@ -1848,7 +1977,21 @@ class ReadOnlyPlayerDetector:
             value = float(result.max())
             if value > best:
                 best = value
-        score = (best - self.name_glyph_floor) / self.name_glyph_span
+        return float(max(0.0, min(1.0, best)))
+
+    def _name_plate_score(self, gameplay, location):
+        """名字字形分(0~1): 原始相关值经 (corr-floor)/span 归一化后的分数。
+
+        实测判别力(真实帧, 多尺度+对齐):
+          本人名字牌      0.54~0.58
+          同牌打乱字序    0.45~0.50   (其他玩家名字的最坏上界)
+          随机笔画假名字牌 0.31
+
+        返回值只影响候选排序, 不做拒绝——跳跃/宠物遮挡导致名字糊掉时降级为
+        纯位置+身份分排序, 不会因为字形低就丢框。
+        """
+        corr = self._name_plate_corr(gameplay, location)
+        score = (corr - self.name_glyph_floor) / self.name_glyph_span
         return float(min(1.0, max(0.0, score)))
 
     def _glyph_score(self, patch):

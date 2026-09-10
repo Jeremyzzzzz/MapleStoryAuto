@@ -67,7 +67,10 @@ class HpMpOcrReader:
     EXP 用于经验统计: 记录当前经验值数字(如 324625, 不含方括号内的百分比)。
     独立 RapidOCR 后台线程, 不阻塞主循环。
     """
-    REFERENCE_WIDTH = 1278  # config bar_regions 的参考宽度
+    # 【2026-09-09 统一参考宽度】: 客户端 UI 改版后, 血条/OCR 区域全部按当前
+    # 帧尺寸(1370x815)标定 —— 这里从 1278 改成 1370, 与 config 的 bar_regions /
+    # hp_ocr_region 保持同一坐标口径, 避免每次标定都要换算两套坐标系。
+    REFERENCE_WIDTH = 1370
 
     def __init__(self, hp_region, mp_region, exp_region=None, submit_interval=0.25, ocr_threads=1):
         self.hp_region = tuple(hp_region)  # [x, y, w, h] 参考1278宽坐标
@@ -3580,7 +3583,7 @@ class MinimapWaypointPatrol:
         self.is_recording_recall = False  # F11 恢复路线录制中(F2/F3 打进 recall_points)
         self.one_shot = False          # one-shot: 走完最后一个点即停, 不循环
         self._one_shot_done = False    # one-shot 已走完(主循环据此执行商城脚本)
-        self._plat_stall_ts = 0.0      # Y平台校验"整圈无同平台点"停滞警告节流
+        self._plat_stall_ts = 0.0      # (已弃用: 顶层Y平台校验已移除)
         # 完成一轮(回到第1点)时的回调(主循环注入, 用于经验统计):
         # 签名 round_complete(round_count). 未注入则无操作。
         self.on_round_complete = None
@@ -3811,17 +3814,6 @@ class MinimapWaypointPatrol:
         return "none", reason + "_w"
 
     # ---- 回放(逐段执行 + 失误从头, 纯录制回放) ----
-    def _find_same_platform(self, start_idx, cur_ny):
-        """从 start_idx 起(环形)找第一个与 cur_ny 同平台(|ΔY|<=recover_y_tol)的段。
-        返回索引; 整圈都没有返回 -1。"""
-        n = len(self.waypoints)
-        for _k in range(n):
-            _i = (start_idx + _k) % n
-            _d = abs(float(self.waypoints[_i]["ny"]) - cur_ny)
-            if _d <= self.recover_y_tol + 1e-9:
-                return _i
-        return -1
-
     def decide(self, map_norm, now):
         """按动作段序列执行(纯录制回放): 直接看 JSON 里记录的到达方式执行,
         不做 dx/dy 几何逻辑判断。每段到达目标才推进下一段;
@@ -3850,31 +3842,14 @@ class MinimapWaypointPatrol:
         nx, ny = float(map_norm[0]), float(map_norm[1])
         dx, dy = tnx - nx, tny - ny
 
-        # 【Y平台校验(用户要求: 只有相同Y坐标的点才会被巡航选中)】:
-        # 当前段点与角色不在同平台(ΔY > recover_y_tol)时不执行该点——
-        # 前进方向找第一个同Y段切换过去; 整圈都没有则停滞等待(节流警告),
-        # 绝不原地跳/死循环(修复: A平台角色触发B平台同X跳点原地一直跳,
-        # 以及无同平台点时'恢复→重启'无限死循环导致圈走不完, 安全点/
-        # 经验统计全部卡死)。爬绳段(climb)目标在上方属正常, 不校验。
-        if (not self._action_state
-                and action not in self.ACTION_CLIMB
-                and abs(ny - tny) > self.recover_y_tol):
-            _bi = self._find_same_platform(self.idx, ny)
-            if _bi >= 0:
-                logger.warning(
-                    f"[wp] 段{self.idx + 1} 点Y={tny:.4f} 与角色Y={ny:.4f} "
-                    f"不在同平台(ΔY={abs(ny - tny):+.4f}), 切换到同平台点"
-                    f" 第{_bi + 1}个")
-                self.idx = _bi
-                self._reset_attempt()
-            else:
-                if now - self._plat_stall_ts > 5.0:
-                    self._plat_stall_ts = now
-                    logger.warning(
-                        f"[wp] 角色所在平台(Y={ny:.4f}) 整圈无匹配点位, "
-                        f"停止执行等待 — 请重新录制路线(F1-F4)或按 F6 重定位")
-                self._point_start = now   # 停滞等待: 不触发40s超时重启
-            return "none", "wp_y_platform"
+        # 【Y平台校验: 已移除】(2026-09-10 用户要求还原)
+        # 原逻辑(2026-09-04 加的): 当前段与角色 Y 不同平台时, 环形搜索第一个
+        # 同Y段切过去。这个"环形"会【向后绕回已走过的点】—— 实测 BUG:
+        # A、B 同平台, 走到 B 后下一段 C 在另一平台 -> 校验失败 -> 环形搜索
+        # 绕回 A -> 人物从 B 走回 A, 到 A 后又触发 B …… A↔B 无限来回走。
+        # 现在还原为"逐段正常执行": 各段自己的机制负责纠错
+        # (move 段的"纵向不可达"前向跳过 / 超时重启 / 跳跃段自身的对齐与恢复),
+        # 不再在顶部把 idx 切来切去。
 
         # ---- 超时保护: 当前段尝试过久 -> 从头开始 ----
         if self._point_start == 0.0:
@@ -6071,6 +6046,86 @@ def load_config(name):
     return override_cfg(cfg, load_yaml(f"config/config_{name}.yaml"))
 
 
+def camera_allowed_screen_x(mini_norm_x, cfg, frame_width=None):
+    """由小地图 mx 算"人物屏幕 X 的允许区间列表" [(lo, hi), ...]。
+
+    模型来自 F2/F3 边缘标定 + 出框样本拟合(沼泽地2 实测):
+      左边缘区 mx<=0.32 : 屏x = 1704*mx + 17   (相机夹在地图左端, 残差中位 0px)
+      中间区   0.32~0.52: 屏x ∈ [574, 797]     (相机跟随 + 预看位移)
+      右边缘区 mx>=0.52 : 屏x = 1530*mx - 10   (相机夹在地图右端, 样本少容差大)
+
+    返回【多个区间】而不是一个范围: 走动时相机滞后会让人物在 mx 已进入边缘区
+    之后仍停留在中间带里(实测 mx=0.5654 时屏x=580), 所以中间带要作为"另一个
+    可能"一起允许 —— 用单区间取并集会把中间整段都放进来(等于不校验)。
+    像素值按 屏宽/参考宽 缩放, 窗口改尺寸自动跟随。返回 None = 不校验。
+    """
+    overlay = cfg.get("perception_overlay", {})
+    if not overlay.get("camera_x_validate", False) or mini_norm_x is None:
+        return None
+    try:
+        mx = float(mini_norm_x)
+    except (TypeError, ValueError):
+        return None
+    ref_w = float(overlay.get("camera_x_reference_width", 1370) or 1370)
+    scale = 1.0 if not frame_width else float(frame_width) / ref_w
+    ranges = []
+    left = overlay.get("camera_x_left")
+    if left and len(left) >= 4 and mx <= float(left[0]) + 0.02:
+        pred = (float(left[1]) * mx + float(left[2])) * scale
+        tol = float(left[3]) * scale
+        ranges.append((pred - tol, pred + tol))
+    # 中间带: 相机滞后时即使 mx 已进入边缘区, 人物仍可能在带内 -> 放宽到
+    # [0.30, 0.58] 都允许(实测 F2/F3 标定 0.3318~0.5187, 前后各留余量)。
+    mid = overlay.get("camera_x_mid")
+    if mid and len(mid) >= 5 and float(mid[0]) - 0.02 <= mx <= float(mid[1]) + 0.06:
+        ranges.append((float(mid[2]) * scale - float(mid[4]) * scale,
+                       float(mid[3]) * scale + float(mid[4]) * scale))
+    right = overlay.get("camera_x_right")
+    if right and len(right) >= 4 and mx >= float(right[0]) - 0.02:
+        pred = (float(right[1]) * mx + float(right[2])) * scale
+        tol = float(right[3]) * scale
+        ranges.append((pred - tol, pred + tol))
+    return ranges or None
+
+
+def camera_predicted_x(mini_norm_x, cfg, frame_width=None):
+    """由小地图 mx 预测人物屏幕 x。返回 (pred_x, kind, (lo, hi))。
+
+    kind:
+      "edge" —— 边缘区(相机被夹住): 点预测, 实测残差 0~6px
+      "band" —— 中间区(相机跟随): 只能给【带】, pred_x 取带中心(用户 2026-09-09
+                要求改回居中; 方向法实测不稳定, 不做)
+
+    【用干净阈值, 不重叠】: 左线 mx<=0.33 / 带 0.33~0.52 / 右线 mx>=0.52。
+    校验用的 camera_allowed_screen_x 仍带 ±0.02 容差(避免误拒)。
+    """
+    overlay = cfg.get("perception_overlay", {})
+    if not overlay.get("camera_x_validate", False) or mini_norm_x is None:
+        return None
+    try:
+        mx = float(mini_norm_x)
+    except (TypeError, ValueError):
+        return None
+    ref_w = float(overlay.get("camera_x_reference_width", 1370) or 1370)
+    scale = 1.0 if not frame_width else float(frame_width) / ref_w
+    left = overlay.get("camera_x_left")
+    mid = overlay.get("camera_x_mid")
+    right = overlay.get("camera_x_right")
+    if left and len(left) >= 4 and mx <= float(left[0]) + 0.01:
+        pred = (float(left[1]) * mx + float(left[2])) * scale
+        tol = float(left[3]) * scale
+        return (pred, "edge", (pred - tol, pred + tol))
+    if right and len(right) >= 4 and mx >= float(right[0]) - 0.01:
+        pred = (float(right[1]) * mx + float(right[2])) * scale
+        tol = float(right[3]) * scale
+        return (pred, "edge", (pred - tol, pred + tol))
+    if mid and len(mid) >= 5:
+        lo = float(mid[2]) * scale - float(mid[4]) * scale
+        hi = float(mid[3]) * scale + float(mid[4]) * scale
+        return ((lo + hi) / 2.0, "band", (lo, hi))
+    return None
+
+
 def target_is_foreground(window_title):
     import pygetwindow as gw
 
@@ -6405,6 +6460,10 @@ def main():
                 _overlay.get("player_name_glyph_min", 0.60)),
             name_glyph_margin=float(
                 _overlay.get("player_name_glyph_margin", 0.10)),
+            name_glyph_min_raw=float(
+                _overlay.get("player_name_glyph_min_raw", 0.45)),
+            name_glyph_margin_raw=float(
+                _overlay.get("player_name_glyph_margin_raw", 0.02)),
         )
         _codex_ocr = None
         if _codex_ocr_enabled:
@@ -6446,6 +6505,32 @@ def main():
             _last_mini_y = None        # 上一帧 mini_norm_y
             _last_screen_cy = None     # 上一帧屏幕中心y(丢帧估计的起点)
             _tele_warn_at = 0.0        # "检测瞬移"告警节流(每5s一条)
+            # ---- 镜头可视框标定(用户方案 2026-09-09) ----
+            # 规律(实测): 人物在镜头死区盒子(56x56, 屏幕中心附近)内移动时镜头
+            # 不滚; 一旦推出盒子边界镜头才滚; 夹在地图两端时人物屏幕位置随小地图
+            # 线性移动, 灵敏度 |Δ屏x/Δmx| = 地图世界宽度 W(px)。
+            # 所以 W 的估计 = 静止样本对之间 |Δ屏x|/|Δmx| 的中位数(镜头不滚时
+            # 该比值恒等于 W; 镜头滚动的样本会把比值压低, 取中位数抗噪)。
+            # 有了 W: 镜头可视框在小地图上的宽度 = 屏宽/W, 中心跟随人物, 贴到
+            # 小地图边界就是"镜头夹住 = 人物在地图边缘"。
+            _cam_still_x = []          # [(mini_x, screen_cx), ...] 静止样本
+            _cam_still_y = []
+            _cam_ratio_x = []          # 灵敏度样本
+            _cam_ratio_y = []
+            _cam_w_est = None          # 平滑后的地图世界宽度 W(px)
+            _cam_h_est = None          # 平滑后的地图世界高度 H(px)
+            _cam_tick = 0
+            _cam_log_at = 0.0          # [镜头标定] 日志节流
+            _reject_streak = 0         # 强跟踪连续拒帧计数(超时保护用)
+            _cam_reject_streak = 0     # 位置校验连续拒绝计数(防呆)
+            _cam_validate_paused_until = 0.0   # 位置校验暂停到此时刻
+            _cam_last_x = None         # 上一帧可信的屏幕 x(相机锚, 红点预测用)
+            _cam_last_y = None         # 上一帧可信的屏幕 y(预测框画同高度)
+            _cam_last_mx = None        # 对应的自己 mx
+            _cam_last_t = 0.0          # 锚点时间戳(>0.5s 视为过期, 不用它预测)
+            _pred_x = None             # 本帧预测屏幕 x(可视化红框用)
+            _pred_y = None             # 本帧预测屏幕 y
+            _pred_mx = None            # 本帧自己 mx(可视化显示用)
 
             def _update_strip_ref(self, frame, gameplay_height):
                 """从自己 color_anchor 定位的 anchor_box 提取称号条平均色作参照。"""
@@ -6486,7 +6571,160 @@ def main():
                             f"[玩家定位] OCR确认: src={ocr_identity.get('identity_source')} "
                             f"text={ocr_identity.get('text')!r} loc={ocr_identity['location']} "
                             f"锚点={'有' if ocr_identity.get('anchor_box') is not None else '无'}")
+                # ---- 【红点辅助定位】(用户方案 2026-09-09) ----
+                # 相机是共享的 -> 别人的屏幕 x = 自己的屏幕 x + W*(mx_红点 - mx_自己)。
+                # 用【上一帧可信的自己位置】+【本帧自己的 mx】预测自己位置, 再由
+                # 小地图红点算出"别人可能出现的屏幕 x 区间", 交给检测器剔除 ——
+                # 别人的勋章与自己完全同款, 只能靠位置区分。
+                _mmp = locate_minimap_players(frame, cfg.get("minimap", {}))
+                _mini = _mmp.get("player")
+                _ov_cfg = cfg["perception_overlay"]
+                # 【模型适用性检查】(2026-09-09): 镜头模型是在沼泽地2、画布
+                # 107x99 下标定的。小地图面板尺寸随地图变化(实测岩石路III 是
+                # 122x115), 换图后 mx 的物理含义完全变了 —— 校验会把正确的人
+                # 判成误检(连拒20帧后防呆暂停, 暂停窗口里反而误检别人)。
+                # 画布尺寸不匹配就直接停用模型(只在变化时打一条日志)。
+                _cv_w, _cv_h = 0, 0
+                if _mini is not None and _mini.get("canvas_size"):
+                    _cv_w = int(_mini["canvas_size"][0])
+                    _cv_h = int(_mini["canvas_size"][1])
+                _cv_ref = cfg["perception_overlay"].get("camera_model_canvas")
+                _model_ok = True
+                if _cv_ref and len(_cv_ref) >= 2 and _cv_w > 0:
+                    _rw, _rh = float(_cv_ref[0]), float(_cv_ref[1])
+                    if (abs(_cv_w - _rw) > 0.05 * _rw
+                            or abs(_cv_h - _rh) > 0.05 * _rh):
+                        _model_ok = False
+                if not _model_ok:
+                    if not getattr(policy, "_cam_model_warned", False):
+                        policy._cam_model_warned = True
+                        logger.warning(
+                            f"[位置校验] 小地图画布={_cv_w}x{_cv_h} 与标定"
+                            f"{_cv_ref} 不符(换地图/改面板), 本次停用镜头模型")
+                else:
+                    policy._cam_model_warned = False
+                self._model_ok = _model_ok
+                _veto = []
+                _veto_self_x = None
+                _pred_kind = None
+                # 【预测位置】只用 F2/F3 标定的分段模型(实测残差 0px), 不用
+                # "上帧位置+W×Δmx"那种连续性公式 —— 后者假设相机不滚动且锚点
+                # 会过期, 实测飘到 91 vs 实际 487, 会让剔除逻辑误剔自己、留下
+                # 别人(2026-09-09 用户发现的误检根因)。
+                _pred = None
+                if _model_ok and _mini is not None and _mini.get("map_norm"):
+                    _pred = camera_predicted_x(
+                        _mini["map_norm"][0], cfg, frame.shape[1])
+                if _pred is not None:
+                    _pred_kind = _pred[1]
+                    if _pred[1] == "edge":
+                        # 边缘区: 自己的屏幕 x 是精确点 -> 红点相对位置也精确
+                        _veto_self_x = _pred[0]
+                self._pred_x = _pred[0] if _pred is not None else None
+                self._pred_y = self._cam_last_y
+                self._pred_mx = (float(_mini["map_norm"][0])
+                                 if (_mini is not None and _mini.get("map_norm"))
+                                 else None)
+                try:
+                    # 中间区不做红点剔除: 自己位置在 223px 带内不确定, 相对
+                    # 预测的误差同样有 ±223px, 剔谁都是猜(会把正确的剔掉)。
+                    if (bool(_ov_cfg.get("player_red_dot_reject", True))
+                            and _pred_kind == "edge" and _veto_self_x is not None
+                            and _mini is not None):
+                        _mx_now = float(_mini["map_norm"][0])
+                        _w_rel = float(_ov_cfg.get("camera_world_width", 1730.0))
+                        _rad = float(_ov_cfg.get("red_dot_veto_radius", 50.0))
+                        for _rd in (getattr(policy, "_red_dots", None) or []):
+                            _rn = _rd.get("map_norm")
+                            if not _rn:
+                                continue
+                            _exp_r = (_veto_self_x
+                                      + _w_rel * (float(_rn[0]) - _mx_now))
+                            if -50.0 <= _exp_r <= frame.shape[1] + 50.0:
+                                _veto.append((_exp_r - _rad, _exp_r + _rad))
+                except Exception:
+                    _veto = []
+                _codex_player.veto_screen_x = _veto
+                _codex_player.veto_self_x = _veto_self_x
+                # 【允许范围】喂给检测器做候选过滤(而不是事后否决结果):
+                # X 用镜头模型区间(仅模型适用时), Y 用 camera_y_zone(始终生效)。
+                try:
+                    _allow_for_detector = (camera_allowed_screen_x(
+                        _mini["map_norm"][0], cfg, frame.shape[1])
+                        if (_model_ok and _mini is not None
+                            and _mini.get("map_norm")) else None)
+                    _codex_player.allow_screen_x = _allow_for_detector or []
+                    _yz = cfg["perception_overlay"].get("camera_y_zone")
+                    _codex_player.allow_screen_y = (
+                        (float(_yz[0]), float(_yz[1]))
+                        if (_yz and len(_yz) >= 2) else None)
+                except Exception:
+                    _codex_player.allow_screen_x = []
+                    _codex_player.allow_screen_y = None
                 raw = _codex_player.detect(frame, gameplay_height)
+                # 诊断日志: 红点剔除生效时(节流 2s)记录剔除了几条候选
+                if _veto and getattr(_codex_player, "veto_applied", 0) > 0:
+                    if now - getattr(policy, "_veto_log_at", 0.0) > 2.0:
+                        policy._veto_log_at = now
+                        logger.info(
+                            f"[红点辅助] 剔除候选 {_codex_player.veto_applied} 条 "
+                            f"(红点屏幕区间={[(round(a), round(b)) for a, b in _veto]} "
+                            f"mx自己={_mini['map_norm'][0]:.4f})")
+                # ---- 【位置校验】(用户方案 2026-09-09) ----
+                # X: 用 F2/F3 标定的镜头模型算出"当前 mx 下人物屏幕 X 的允许区间"
+                #    —— 依赖小地图画布尺寸, 换地图时自动停用(_model_ok)。
+                # Y: 人物的 Y 不会离开镜头框(屏幕空间属性, 与小地图无关), 所以
+                #    Y 校验【始终生效】—— 实测两个同款勋章玩家字形分都饱和到 1.0
+                #    无法区分时, Y 是唯一还能分辨"上平台那个人"的依据。
+                if (raw is not None and raw.get("box") and _mini is not None
+                        and _mini.get("map_norm")
+                        and now >= self._cam_validate_paused_until):
+                    _rb = raw["box"]
+                    _rcx = float(_rb[0]) + float(_rb[2]) / 2.0
+                    _rcy = float(_rb[1]) + float(_rb[3]) / 2.0
+                    _allow = None
+                    if _model_ok:
+                        _allow = camera_allowed_screen_x(
+                            _mini["map_norm"][0], cfg, frame.shape[1])
+                    _yzone = cfg["perception_overlay"].get("camera_y_zone")
+                    _y_bad = False
+                    if _yzone and len(_yzone) >= 2:
+                        _y_lo, _y_hi = float(_yzone[0]), float(_yzone[1])
+                        _y_bad = not (_y_lo <= _rcy <= _y_hi)
+                    _x_bad = (_allow is not None
+                              and not any(_lo <= _rcx <= _hi for _lo, _hi in _allow))
+                    if _x_bad or _y_bad:
+                        self._cam_reject_streak += 1
+                        if self._cam_reject_streak > 20:
+                            # 防呆: 连续拒绝过多说明模型不适用于当前地图/窗口
+                            # (例如人物跑到别的地图) -> 暂停校验 10s, 绝不能
+                            # 因此把机器人弄瞎。
+                            self._cam_validate_paused_until = now + 10.0
+                            self._cam_reject_streak = 0
+                            logger.warning(
+                                "[位置校验] 连续拒绝过多, 暂停校验10s"
+                                "(模型可能不适用于当前地图/窗口)")
+                        else:
+                            if now - getattr(policy, "_cam_reject_at", 0.0) > 1.0:
+                                policy._cam_reject_at = now
+                                logger.warning(
+                                    f"[位置校验] 拒绝候选 屏=({_rcx:.0f},{_rcy:.0f}) "
+                                    f"X允许"
+                                    f"{[(round(a), round(b)) for a, b in (_allow or [])]} "
+                                    f"Y允许={_yzone} mx={_mini['map_norm'][0]:.4f} "
+                                    f"置信={raw.get('confidence')} "
+                                    f"模式={raw.get('identity_mode')}")
+                            raw = None
+                    else:
+                        self._cam_reject_streak = 0
+                # 可信检测 -> 更新"相机锚"(下一帧预测/红点剔除用)
+                if (raw is not None and raw.get("box") and _mini is not None
+                        and _mini.get("map_norm")):
+                    _abx = raw["box"]
+                    self._cam_last_x = float(_abx[0]) + float(_abx[2]) / 2.0
+                    self._cam_last_y = float(_abx[1]) + float(_abx[3]) / 2.0
+                    self._cam_last_mx = float(_mini["map_norm"][0])
+                    self._cam_last_t = now
                 # 统计【其他玩家】称号条: 用自己定位框中心附近作为排除区(自己那条
                 # 不计入)——否则"自己那条 + 打怪特效蓝色块" = 2 触发误停。
                 _excl = self._strip_excl_center
@@ -6531,7 +6769,7 @@ def main():
                 _is_hold = bool(p.get("missed_frames", 0) > 0
                                 or p.get("tracking_state") == "PREDICTED"
                                 or p.get("identity_mode") == "color_anchor_hold")
-                _mini = locate_minimap_player(frame, cfg.get("minimap", {}))
+                # (_mini 已在上面"位置校验"处取过一次, 这里复用)
                 if _mini is not None and _mini.get("map_norm"):
                     _mnx = float(_mini["map_norm"][0])
                     _mny = float(_mini["map_norm"][1])
@@ -6550,9 +6788,33 @@ def main():
                     _dy_tol = _pt_dy * (2.0 if _jump_ex else 1.0)
                     # 【强跟踪拒帧】: 真检测与映射预测偏差超阈值 = 瞬移/飘半空
                     # (小地图匀速左移时框不可能瞬移右边; Y不变时框不可能飘半空)
-                    _teleported = (not _is_hold
+                    # 【2026-09-09 默认关闭(用户要求)】: 镜头规律是"死区盒子 +
+                    # 两端夹住", 不是线性映射; 线性拟合一旦偏掉就会把【正确】
+                    # 检测判成瞬移 -> 拒帧后又不更新拟合样本(下面 if not _is_hold
+                    # 保护) -> 永久自锁, 黄框被钉在错的估计上(实测: 真检测
+                    # (548,422) 置信1.0 被"瞬移1699px"扔掉, 框卡在(40,278))。
+                    # 所以默认只接受真检测; 需要时可把
+                    # perception_overlay.player_strong_track_reject 改回 true,
+                    # 并保留连续拒帧超时(6帧≈0.5s)强制接受+重置拟合, 防自锁。
+                    _reject_on = bool(cfg["perception_overlay"].get(
+                        "player_strong_track_reject", False))
+                    _teleported = (_reject_on and not _is_hold
                                    and ((_est_cx is not None and abs(_cx - _est_cx) > _dx_tol)
                                         or (_est_cy is not None and abs(_cy - _est_cy) > _dy_tol)))
+                    if _teleported:
+                        self._reject_streak += 1
+                        if self._reject_streak > 6:
+                            # 超时: 相信真检测, 清掉错的拟合重新学
+                            _teleported = False
+                            self._reject_streak = 0
+                            self._motion_samples = []
+                            self._motion_samples_y = []
+                            self._motion_linear = None
+                            self._motion_linear_y = None
+                            logger.warning(
+                                "[强跟踪] 连续拒帧超时, 改用真检测并重置线性拟合")
+                    else:
+                        self._reject_streak = 0
                     if _teleported:
                         if now - self._tele_warn_at > 5.0:
                             self._tele_warn_at = now
@@ -6590,6 +6852,52 @@ def main():
                         self._last_screen_cx = _cx
                         self._last_mini_y = _mny
                         self._last_screen_cy = _cy
+                        # ---- 镜头可视框标定: 静止样本 -> W/H 估计 ----
+                        # 只在"静止"帧取样(移动中检测框有滞后, 会污染灵敏度)。
+                        # 样本窗口 400 帧(约 33s), 覆盖多次停留点; 每隔 5 帧把
+                        # 当前样本与若干历史样本做差, 得到 |Δ屏|/|Δm| 灵敏度。
+                        if p.get("motion_state", "STILL") == "STILL":
+                            self._cam_still_x.append((_mnx, _cx))
+                            self._cam_still_y.append((_mny, _cy))
+                            if len(self._cam_still_x) > 400:
+                                self._cam_still_x.pop(0)
+                            if len(self._cam_still_y) > 400:
+                                self._cam_still_y.pop(0)
+                            self._cam_tick += 1
+                            if self._cam_tick % 5 == 0:
+                                for _samples, _ratios in (
+                                        (self._cam_still_x, self._cam_ratio_x),
+                                        (self._cam_still_y, self._cam_ratio_y)):
+                                    if len(_samples) < 14:
+                                        continue
+                                    _now_m, _now_s = _samples[-1]
+                                    for _idx in (-13, -26, -50, -100, -200):
+                                        if len(_samples) < abs(_idx):
+                                            continue
+                                        _pm, _ps = _samples[_idx]
+                                        _dm = abs(_now_m - _pm)
+                                        if _dm < 0.008:
+                                            continue
+                                        _ratios.append(abs(_now_s - _ps) / _dm)
+                                        if len(_ratios) > 300:
+                                            _ratios.pop(0)
+                                if len(self._cam_ratio_x) >= 8:
+                                    _w = float(np.median(self._cam_ratio_x))
+                                    self._cam_w_est = (
+                                        _w if self._cam_w_est is None
+                                        else self._cam_w_est * 0.8 + _w * 0.2)
+                                    if time.time() - self._cam_log_at > 20.0:
+                                        self._cam_log_at = time.time()
+                                        logger.info(
+                                            f"[镜头标定] 地图世界宽 W≈{self._cam_w_est:.0f}px "
+                                            f"可视框宽={frame.shape[1] / self._cam_w_est:.2f}(小地图比例) "
+                                            f"H≈{('%.0f' % self._cam_h_est) if self._cam_h_est else '?'} "
+                                            f"样本={len(self._cam_ratio_x)}/{len(self._cam_ratio_y)}")
+                                if len(self._cam_ratio_y) >= 8:
+                                    _h = float(np.median(self._cam_ratio_y))
+                                    self._cam_h_est = (
+                                        _h if self._cam_h_est is None
+                                        else self._cam_h_est * 0.8 + _h * 0.2)
                     else:
                         # 丢失/强跟踪拒帧: 用映射估计屏幕位置(双轴)
                         if _est_cx is None and self._motion_linear is not None:
@@ -6914,6 +7222,8 @@ def main():
     # 恢复路线配置(触发判定/冷却)
     _recall_cfg = cfg.get("recall_point", {})
     recall_y_tol = float(_recall_cfg.get("trigger_y_tol", 0.03))
+    # 【触发余量】: 人物 ny 必须比"最下方巡游点"还要低这么多才算掉到巡游线下方
+    recall_below_margin = float(_recall_cfg.get("below_margin", 0.01))
     recall_cooldown = float(_recall_cfg.get("cooldown_seconds", 30.0))
     recall_max_trip = float(_recall_cfg.get("max_trip_seconds", 120.0))  # 恢复行程超时(卡住取消)
     # 测谎提醒(画面异常检测): 怪物=0+小地图坐标丢失+玩家框消失持续N秒 -> 蜂鸣
@@ -7226,6 +7536,9 @@ def main():
             _minimap_players = locate_minimap_players(frame, minimap_cfg)
             _red_dots = _red_tracker.update(
                 _minimap_players.get("other_players") or [])
+            # 存到 policy 供【红点辅助定位】用(下一帧玩家检测时按红点位置剔除
+            # 别人的勋章候选; 用已跨帧确认的红点, 抖动小)
+            policy._red_dots = _red_dots
             _has_other = len(_red_dots) >= 1
             # 小地图稳定坐标: 每帧定位玩家在地图里的左右位置
             mini = _minimap_players.get("player")
@@ -7550,6 +7863,32 @@ def main():
                     waypoint_patrol.is_recording = True
                     logger.info("[热键] F1 启动录制: 手动走到点位后按 F2 打普通点 / F3 打跳跃点, F4 保存")
                 elif fn == "f2":
+                    # 【非录制状态: F2 = 标定"地图左边缘点"】(用户方案 2026-09-09)
+                    # 含义: 人物走到这个点后, 再往左走镜头就不再滚动(相机被地图
+                    # 左端夹住) -> 从这里开始人物屏幕坐标随世界坐标线性移动。
+                    if not (waypoint_patrol.is_recording
+                            or waypoint_patrol.is_recording_safe
+                            or waypoint_patrol.is_recording_recall):
+                        _mn = mini.get("map_norm") if mini else None
+                        _pc = player.get("center") if player else None
+                        if _mn is None:
+                            logger.warning("[边缘标定] F2 失败: 无小地图坐标")
+                        else:
+                            _marks = getattr(policy, "_edge_marks", None)
+                            if _marks is None:
+                                _marks = {}
+                                policy._edge_marks = _marks
+                            _marks["left"] = {
+                                "mx": float(_mn[0]), "my": float(_mn[1]),
+                                "sx": None if _pc is None else int(_pc[0]),
+                                "sy": None if _pc is None else int(_pc[1]),
+                                "t": now,
+                            }
+                            logger.info(
+                                f"[边缘标定] F2 左边缘点 小地图norm=({_mn[0]:.4f},{_mn[1]:.4f}) "
+                                f"屏幕={None if _pc is None else (int(_pc[0]), int(_pc[1]))} "
+                                f"检测={player.get('identity_mode') if player else None}")
+                        continue
                     # F2: 打普通点(安全点/恢复路线录制中打进各自序列, 否则打主航线)
                     if waypoint_patrol.is_recording_safe:
                         _ok = waypoint_patrol.add_manual_point_to(
@@ -7574,6 +7913,32 @@ def main():
                     else:
                         logger.warning("[热键] F2 打点失败(无小地图坐标或与上一点重合)")
                 elif fn == "f3":
+                    # 【非录制状态: F3 = 标定"地图右边缘点"】(用户方案 2026-09-09)
+                    # 含义: 人物走到这个点后, 再往右走镜头就不再滚动(相机被地图
+                    # 右端夹住) -> 从这里开始人物屏幕坐标随世界坐标线性移动。
+                    if not (waypoint_patrol.is_recording
+                            or waypoint_patrol.is_recording_safe
+                            or waypoint_patrol.is_recording_recall):
+                        _mn = mini.get("map_norm") if mini else None
+                        _pc = player.get("center") if player else None
+                        if _mn is None:
+                            logger.warning("[边缘标定] F3 失败: 无小地图坐标")
+                        else:
+                            _marks = getattr(policy, "_edge_marks", None)
+                            if _marks is None:
+                                _marks = {}
+                                policy._edge_marks = _marks
+                            _marks["right"] = {
+                                "mx": float(_mn[0]), "my": float(_mn[1]),
+                                "sx": None if _pc is None else int(_pc[0]),
+                                "sy": None if _pc is None else int(_pc[1]),
+                                "t": now,
+                            }
+                            logger.info(
+                                f"[边缘标定] F3 右边缘点 小地图norm=({_mn[0]:.4f},{_mn[1]:.4f}) "
+                                f"屏幕={None if _pc is None else (int(_pc[0]), int(_pc[1]))} "
+                                f"检测={player.get('identity_mode') if player else None}")
+                        continue
                     # F3: 打跳跃点(安全点/恢复路线录制中打进各自序列, 否则打主航线)
                     if waypoint_patrol.is_recording_safe:
                         _ok = waypoint_patrol.add_manual_point_to(
@@ -7882,10 +8247,13 @@ def main():
                     logger.info(
                         f"[恢复路线] 恢复完成, 恢复正常巡游({recall_cooldown:.0f}s冷却)")
             else:
-                # 跌落触发(用户要求: 只按 Y 判定): 玩家Y与恢复路线第一个点
-                # 同水平(±trigger_y_tol) == 掉到最下层, 立刻走恢复路线——
-                # 不再要求主航线目标在上方(那会漏判: 掉下来后主航线仍巡航,
-                # 用户反馈"掉下来还是巡航状态"非常严重)。
+                # 【触发条件(用户要求 2026-09-10 重写): 只有一个 —— 人物处于
+                # 所有巡游路线点的【下方】】。
+                # 旧条件"玩家Y与恢复路线起点同水平(±trigger_y_tol)"太容易命中:
+                # 人物在正常巡游平台的同一条 Y 上左右走就会触发恢复路线, 训练时
+                # 反复打断, 甚至和巡游互锁成死循环(用户报告)。
+                # 判定: ny(小地图 y, 向下增大) > 所有巡游点 ny 的最大值 + 余量
+                # -> 说明人物掉到了整条巡游线下方, 正常左右走不可能回到巡游线。
                 if (policy.mode == "minimap_patrol"
                         and waypoint_patrol.is_patrolling()
                         and not waypoint_patrol.is_recording
@@ -7895,17 +8263,21 @@ def main():
                         and recall_patrol.recall_points
                         and mini is not None and mini.get("map_norm")
                         and now >= _recall_cooldown_until):
-                    _rny = float(recall_patrol.recall_points[0]["ny"])
                     _ny = float(mini["map_norm"][1])
-                    if abs(_ny - _rny) <= recall_y_tol:
+                    _wps = waypoint_patrol.waypoints
+                    _wp_bottom = (max(float(w["ny"]) for w in _wps)
+                                  if _wps else None)
+                    if (_wp_bottom is not None
+                            and _ny > _wp_bottom + recall_below_margin):
                         if recall_patrol.begin_recall():
                             policy._recall_active = True
                             _recall_state = "walk"
                             _recall_at = now
                             logger.warning(
-                                f"[恢复路线] 跌落检测! 玩家Y={_ny:.4f} 与恢复路线"
-                                f"起点Y={_rny:.4f} 同水平(±{recall_y_tol}), "
-                                f"立即走恢复路线回巡游线")
+                                f"[恢复路线] 触发! 人物Y={_ny:.4f} 已在"
+                                f"所有巡游点下方(最下方巡游点Y={_wp_bottom:.4f}, "
+                                f"余量{recall_below_margin}) -> 左右走回不去, "
+                                f"走恢复路线回巡游线")
                         else:
                             logger.warning("[恢复路线] 触发失败: 恢复路线为空")
                 # 商城/恢复站定阶段: 不打怪不移动
@@ -8075,6 +8447,21 @@ def main():
                         cv2.circle(frame, (int(_fx), int(_fy)), 9, (0, 255, 255), 2)
                         cv2.line(frame, (int(_fx) - 14, int(_fy)), (int(_fx) + 14, int(_fy)), (0, 255, 255), 1)
                         cv2.line(frame, (int(_fx), int(_fy) - 14), (int(_fx), int(_fy) + 14), (0, 255, 255), 1)
+                    # ---- 边缘标定点(F2=左边缘 / F3=右边缘) 画在小地图上 ----
+                    _emk = getattr(policy, "_edge_marks", None)
+                    if (_emk and _mini_hud.get("canvas_frame_box")
+                            and _mini_hud.get("canvas_size")):
+                        _cb2 = _mini_hud["canvas_frame_box"]
+                        _cs2 = _mini_hud["canvas_size"]
+                        for _ek, _ev in _emk.items():
+                            _ex = int(_cb2[0] + float(_ev["mx"]) * _cs2[0])
+                            _ey = int(_cb2[1] + float(_ev["my"]) * _cs2[1])
+                            _ecol = (255, 80, 0) if _ek == "left" else (0, 80, 255)
+                            cv2.circle(frame, (_ex, _ey), 6, _ecol, 2, cv2.LINE_AA)
+                            cv2.putText(frame, "L" if _ek == "left" else "R",
+                                        (_ex + 7, _ey - 7),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, _ecol, 2,
+                                        cv2.LINE_AA)
                 # ---- 其他玩家(小地图红点)状态 HUD ----
                 # R1/R2 = 已确认的其他玩家红点(跨帧确认后); 挂机时显示"挂机中"
                 if len(_red_dots) > 0:
@@ -8091,6 +8478,149 @@ def main():
                 draw_detections(frame, player, cached_monsters, advisory)
                 # 攻击范围+巡游打怪框画在检测框之后(最上层), 防被玩家框遮挡
                 draw_attack_range(frame, player, policy)
+                # ---- 【预测框】(用户要求 2026-09-09: 红框=公式预测的位置) ----
+                # 红框画在"用上一帧可信位置 + W×小地图位移"算出来的预测位置上,
+                # 尺寸与人物框一致。红框与黄框(实际检测)重合 = 公式对; 偏开 =
+                # 公式/参数有问题。左上角同时显示: 预测x / 实测x / 偏差 / mx / W。
+                # 没有预测(刚启动/丢框)时退回配置的固定参照点或屏幕中心。
+                try:
+                    _title_h = int(cfg["game_window"].get("title_bar_height", 0) or 0)
+                    _ui_y = int(round(
+                        int(cfg["ui_coords"]["ui_y_start"])
+                        * frame.shape[1]
+                        / float(cfg["ui_coords"].get("reference_width")
+                                or frame.shape[1])))
+                    _ui_y = max(1, min(frame.shape[0], _ui_y))
+                    _view_top = max(0, min(_ui_y - 1, _title_h))
+                    _pred = None
+                    if (getattr(player_detector, "_model_ok", True)
+                            and _mini_hud is not None
+                            and _mini_hud.get("map_norm")):
+                        _pred = camera_predicted_x(
+                            _mini_hud["map_norm"][0], cfg, frame.shape[1])
+                    _y_top = max(0, _view_top)
+                    _y_bot = min(frame.shape[0], _ui_y)
+                    if _pred is not None:
+                        _gcx = int(round(_pred[0]))
+                        _band_lo, _band_hi = int(round(_pred[2][0])), int(round(_pred[2][1]))
+                        if _pred[1] == "edge":
+                            _ref_label = (f"边缘区预测 x={_gcx} "
+                                          f"(mx={_mini_hud['map_norm'][0]:.4f})")
+                        else:
+                            _ref_label = (f"中间区带 {_band_lo}~{_band_hi} "
+                                          f"(点预测=带中心 {_gcx})")
+                    else:
+                        _ref_xy = cfg["perception_overlay"].get("center_ref_xy")
+                        if _ref_xy and len(_ref_xy) >= 2:
+                            _gcx = int(_ref_xy[0])
+                            _ref_label = f"参照框 x={_gcx}"
+                        else:
+                            _gcx = frame.shape[1] // 2
+                            _ref_label = f"屏幕中心 x={_gcx}"
+                        _band_lo = _band_hi = None
+                    # 中间区: 允许带的左右边界竖线
+                    if _pred is not None and _pred[1] == "band" and _band_lo is not None:
+                        for _bx, _bl in ((_band_lo, "L"), (_band_hi, "R")):
+                            cv2.line(frame, (_bx, _y_top), (_bx, _y_bot),
+                                     (0, 0, 255), 1, cv2.LINE_AA)
+                            cv2.putText(frame, _bl, (_bx + 2, _y_top + 16),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                                        (0, 0, 255), 1, cv2.LINE_AA)
+                    # 【预测线】: 只表示预测的屏幕 X, 不画 Y(避免"红框跟着黄框
+                    # 上下动"的误导 —— 之前 Y 用了上一帧检测值)。
+                    cv2.line(frame, (_gcx, _y_top), (_gcx, _y_bot),
+                             (0, 0, 255), 2, cv2.LINE_AA)
+                    cv2.putText(frame, "P", (_gcx + 4, _y_top + 16),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2,
+                                cv2.LINE_AA)
+                    put_text_cn(frame, _ref_label, (_gcx + 20, _y_top + 40),
+                                0.45, (0, 0, 255), 1, cv2.LINE_AA)
+                    if player is not None and player.get("box"):
+                        _pb = player["box"]
+                        _pcx = float(_pb[0]) + float(_pb[2]) / 2.0
+                        _pcy = float(_pb[1]) + float(_pb[3]) / 2.0
+                        if _pred is not None and _pred[1] == "band":
+                            _tag = ("在带内" if (_band_lo <= _pcx <= _band_hi)
+                                    else "★带外")
+                        else:
+                            _tag = "偏差"
+                        put_text_cn(
+                            frame,
+                            f"{_tag} 实测x={int(round(_pcx))} 预测x={_gcx} "
+                            f"差={_pcx - _gcx:+.0f}",
+                            (14, 128), 0.5, (0, 0, 255), 2, cv2.LINE_AA)
+                    else:
+                        put_text_cn(frame, f"预测x={_gcx} (无检测)",
+                                    (14, 128), 0.5, (0, 0, 255), 2, cv2.LINE_AA)
+                except Exception:
+                    pass
+                # ---- 【镜头死区框 / 走动允许框】(用户方案 2026-09-09) ----
+                # 静止时人物屏幕中心只落在死区框 [656,712]x[422,478];
+                # 走动时相机"预看"位移: 左走 X 最大 794, 右走 X 最小 574, 停下
+                # 后慢慢回到 656~712。中心一旦超出更大的 camera_lag_zone
+                # (574~794 x 362~538) = 相机被地图边缘夹住(到边缘了), X 会继续
+                # 跑到 0 或 1370。出框写日志(含小地图坐标+运动状态), 用于标定
+                # "人物走到小地图哪个位置开始出框" = 地图边缘阈值。
+                try:
+                    _ov = cfg["perception_overlay"]
+                    _refw = float(_ov.get("camera_dead_zone_reference_width", 1370) or 1370)
+                    _sc = frame.shape[1] / _refw
+                    _dz = _ov.get("camera_dead_zone")
+                    _lz = _ov.get("camera_lag_zone")
+                    _pcx = _pcy = None
+                    if player is not None and player.get("box"):
+                        _pb = player["box"]
+                        _pcx = float(_pb[0]) + float(_pb[2]) / 2.0
+                        _pcy = float(_pb[1]) + float(_pb[3]) / 2.0
+                    if _lz and len(_lz) >= 4:
+                        _ox0 = int(round(float(_lz[0]) * _sc))
+                        _ox1 = int(round(float(_lz[1]) * _sc))
+                        _oy0 = int(round(float(_lz[2]) * _sc))
+                        _oy1 = int(round(float(_lz[3]) * _sc))
+                        _out = False
+                        _odx = _ody = 0.0
+                        if _pcx is not None:
+                            _odx = max(_ox0 - _pcx, _pcx - _ox1, 0.0)
+                            _ody = max(_oy0 - _pcy, _pcy - _oy1, 0.0)
+                            _out = (_odx > 0.5 or _ody > 0.5)
+                        _lcol = (0, 140, 255) if _out else (0, 200, 0)
+                        cv2.rectangle(frame, (_ox0, _oy0), (_ox1, _oy1), _lcol, 2,
+                                      cv2.LINE_AA)
+                        put_text_cn(frame, f"走动允许框 {_ox0}~{_ox1} x {_oy0}~{_oy1}",
+                                    (_ox1 + 8, _oy0 + 14), 0.45, _lcol, 1, cv2.LINE_AA)
+                        if _pcx is not None:
+                            if _out:
+                                put_text_cn(
+                                    frame,
+                                    f"★出框(到边缘) dx={_odx:.0f} dy={_ody:.0f}",
+                                    (_ox1 + 8, _oy0 + 36), 0.5, (0, 140, 255), 2,
+                                    cv2.LINE_AA)
+                                _mn = getattr(policy, "_mini", None)
+                                if (_mn and _mn.get("map_norm")
+                                        and now - getattr(policy, "_dz_log_at", 0.0) > 1.0):
+                                    policy._dz_log_at = now
+                                    logger.info(
+                                        f"[死区] 人物出框 屏=({int(_pcx)},{int(_pcy)}) "
+                                        f"小地图norm=({_mn['map_norm'][0]:.4f},"
+                                        f"{_mn['map_norm'][1]:.4f}) "
+                                        f"超出=({_odx:.0f},{_ody:.0f}) "
+                                        f"状态={player.get('motion_state')}")
+                            else:
+                                put_text_cn(frame, "在允许框内",
+                                            (_ox1 + 8, _oy0 + 36), 0.45,
+                                            (0, 200, 0), 1, cv2.LINE_AA)
+                    if _dz and len(_dz) >= 4:
+                        _ix0 = int(round(float(_dz[0]) * _sc))
+                        _ix1 = int(round(float(_dz[1]) * _sc))
+                        _iy0 = int(round(float(_dz[2]) * _sc))
+                        _iy1 = int(round(float(_dz[3]) * _sc))
+                        cv2.rectangle(frame, (_ix0, _iy0), (_ix1, _iy1),
+                                      (0, 0, 255), 2, cv2.LINE_AA)
+                        put_text_cn(frame, f"静止死区 {_ix0}~{_ix1} x {_iy0}~{_iy1}",
+                                    (_ix1 + 8, _iy1 + 16), 0.45, (0, 0, 255), 1,
+                                    cv2.LINE_AA)
+                except Exception:
+                    pass
                 if route_follower.img_routes and minimap_scan is not None:
                     draw_route_overlay(
                         frame, minimap_scan, route_follower,
