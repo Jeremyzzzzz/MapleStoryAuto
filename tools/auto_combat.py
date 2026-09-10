@@ -6227,6 +6227,76 @@ def detect_lie_detector(frame, cfg):
     return False, None
 
 
+# 【报警音】(用户 2026-09-10 选定): 三连升调急报(尖锐、易从游戏音里听出)。
+# 走系统【波形】音量通道(PlaySound), 比 winsound.Beep(走"哔声"通道)明显更响。
+# 文件随仓库提交(tools/sounds/), 另一台电脑 git pull 即可同步。
+_ALARM_WAV = REPO_ROOT / "tools" / "sounds" / "alarm_urgent.wav"
+# 测试可替换: 返回当前鼠标坐标 (x, y)
+_ALARM_CURSOR_FN = None
+
+
+def _alarm_cursor_pos():
+    """当前鼠标坐标(优先 win32api, 退回 pyautogui); 取不到返回 None。"""
+    if _ALARM_CURSOR_FN is not None:
+        return _ALARM_CURSOR_FN()
+    try:
+        import win32api
+        return win32api.GetCursorPos()
+    except Exception:
+        try:
+            import pyautogui
+            return pyautogui.position()
+        except Exception:
+            return None
+
+
+def play_alarm(beeps=3, stop_on_mouse_move=True, move_px=6):
+    """播放报警音(后台线程, 不阻塞主循环)。
+
+    【用户要求 2026-09-10: 一动鼠标就停】—— 报警音很吵, 用户听到后第一反应就是
+    去动鼠标切游戏, 所以检测到鼠标移动超过 move_px 像素就立刻静音
+    (winsound.PlaySound(None, SND_PURGE)), 不再把剩余次数播完。
+    返回线程对象(测试用, 线程带 .elapsed 记录实际播放时长)。
+    """
+    def _beep():
+        _t0 = time.time()
+        try:
+            import winsound
+            _start = _alarm_cursor_pos() if stop_on_mouse_move else None
+            _wav = _ALARM_WAV if _ALARM_WAV.exists() else None
+            for _i in range(max(1, int(beeps))):
+                if _wav is not None:
+                    winsound.PlaySound(
+                        str(_wav),
+                        winsound.SND_FILENAME | winsound.SND_ASYNC)
+                else:
+                    winsound.Beep(1200, 220)
+                # 每次播放约 0.9~1.0s, 期间每 0.1s 查一次鼠标
+                for _ in range(10):
+                    time.sleep(0.1)
+                    if stop_on_mouse_move and _start is not None:
+                        _cur = _alarm_cursor_pos()
+                        if _cur is not None and (
+                                abs(_cur[0] - _start[0])
+                                + abs(_cur[1] - _start[1]) > move_px):
+                            try:
+                                winsound.PlaySound(None, winsound.SND_PURGE)
+                            except Exception:
+                                pass
+                            _beep.elapsed = time.time() - _t0
+                            logger.info(
+                                "[报警] 检测到鼠标移动, 报警音已停止")
+                            return
+        except Exception:
+            pass
+        _beep.elapsed = time.time() - _t0
+    _beep.elapsed = 0.0
+    _th = threading.Thread(target=_beep, daemon=True)
+    _th.elapsed_holder = _beep
+    _th.start()
+    return _th
+
+
 def target_is_foreground(window_title):
     import pygetwindow as gw
 
@@ -7339,31 +7409,22 @@ def main():
     lie_alarm_cooldown = float(_lie_cfg.get("cooldown_seconds", 15.0))
     _lie_last_alarm = 0.0
     _lie_streak = 0        # 连续命中帧数(2帧确认, 防单帧抖动)
+    # 【报警音配置】: 一动鼠标就静音(用户要求: 太吵, 听到就去切游戏了)
+    _snd_cfg = cfg.get("alarm_sound", {})
+    alarm_stop_on_mouse = bool(_snd_cfg.get("stop_on_mouse_move", True))
+    alarm_move_px = int(_snd_cfg.get("stop_move_px", 6))
 
     # 【报警音文件】(用户 2026-09-10 选定): 三连升调急报(尖锐、易从游戏音里听出)。
     # 走系统【波形】音量通道(PlaySound), 比原来的 winsound.Beep(走"哔声"通道)
     # 明显更响。文件随仓库提交(tools/sounds/), 另一台电脑 git pull 即可同步。
-    _ALARM_WAV = REPO_ROOT / "tools" / "sounds" / "alarm_urgent.wav"
-
     def _play_camera_alarm(beeps=3):
-        """报警声(后台线程, 不阻塞主循环): 优先播放 wav; 文件缺失时退回 Beep。"""
-        def _beep():
-            try:
-                import winsound
-                if _ALARM_WAV.exists():
-                    # SND_ASYNC: 立刻返回, 不卡主循环; 重复 beeps 次
-                    for _i in range(max(1, int(beeps))):
-                        winsound.PlaySound(
-                            str(_ALARM_WAV),
-                            winsound.SND_FILENAME | winsound.SND_ASYNC)
-                        time.sleep(1.1)     # 让每次播完(音长约 0.9s)
-                    return
-                for _i in range(max(1, int(beeps))):
-                    winsound.Beep(1200, 220)
-                    time.sleep(0.12)
-            except Exception:
-                pass
-        threading.Thread(target=_beep, daemon=True).start()
+        """报警声(后台线程): 播放 tools/sounds/alarm_urgent.wav;
+        用户【一动鼠标就立刻停】(太吵, 见 play_alarm)。"""
+        return play_alarm(
+            beeps=beeps,
+            stop_on_mouse_move=alarm_stop_on_mouse,
+            move_px=alarm_move_px)
+
     # The map name (and its recorded route) is auto-detected from the minimap
     # in a background thread: the OCR model load is slow (~5s) and must never
     # block the main loop. When it succeeds the routes become available and
