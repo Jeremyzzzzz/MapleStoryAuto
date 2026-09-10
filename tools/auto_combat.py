@@ -6154,6 +6154,70 @@ def camera_predicted_x(mini_norm_x, cfg, frame_width=None):
     return None
 
 
+def detect_lie_detector(frame, cfg):
+    """早期检测"谎探测仪"测谎弹窗(用户要求 2026-09-10)。
+
+    为什么不能只靠旧的"怪物=0/小地图丢失"启发式: 弹窗一出现 3 秒倒计时就开始
+    了, 等 8 秒确认(而且怪本来就可能是 0)早就来不及 —— 用户反馈"已经慢了"。
+    弹窗特征(实测截图): 画面中央一块大的【中性浅灰】面板(#F0F0F0 左右),
+    带深色边框, 内部是文字+图片块(基本平坦)。
+
+    【为什么要大核腐蚀】: "亮 + 低饱和"这个条件在游戏里并不稀有 —— 沼泽/野猪
+    地图的灰色雾气、雪地天空都是亮的低饱和区域, 直接取连通域会连成 1359x611
+    的一大片(填充率只有 0.09~0.44, 是靠阈值侥幸挡住的)。用 21x21 腐蚀后:
+    雾气/地形这种【碎片状】区域整片消失, 只有【实心大块】(弹窗面板)能留下。
+    再检查块内灰度标准差(太花的不算面板)与中心位置(弹窗在画面中央)。
+
+    返回 (命中?, 面板框 [x, y, w, h] 或 None)。
+    """
+    acfg = cfg.get("lie_detector_alarm", {})
+    if frame is None or frame.size == 0:
+        return False, None
+    fh, fw = frame.shape[:2]
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    light = ((hsv[:, :, 2] >= int(acfg.get("light_value", 200)))
+             & (hsv[:, :, 1] <= int(acfg.get("light_sat", 35))))
+    light = light.astype(np.uint8) * 255
+    k = max(3, int(acfg.get("erode_px", 21)) | 1)
+    solid = cv2.erode(light, cv2.getStructuringElement(cv2.MORPH_RECT, (k, k)))
+    n, _, stats, _ = cv2.connectedComponentsWithStats(solid, 8)
+    if n <= 1:
+        return False, None
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    min_area = float(acfg.get("min_area_frac", 0.03)) * fw * fh
+    min_w = float(acfg.get("min_width_frac", 0.20)) * fw
+    min_h = float(acfg.get("min_height_frac", 0.18)) * fh
+    max_std = float(acfg.get("max_std", 60.0))
+    cx_lo, cx_hi = (acfg.get("center_x") or [0.25, 0.75])[:2]
+    cy_lo, cy_hi = (acfg.get("center_y") or [0.15, 0.88])[:2]
+    ar_lo = float(acfg.get("min_aspect", 0.7))
+    ar_hi = float(acfg.get("max_aspect", 2.2))
+    pad = (k - 1) // 2
+    for i in range(1, n):
+        x, y, w, h, area = (int(v) for v in stats[i])
+        if area < min_area:
+            continue
+        # 腐蚀后的块 → 还原成原始面板框
+        bx, by = max(0, x - pad), max(0, y - pad)
+        bw = min(fw - bx, w + 2 * pad)
+        bh = min(fh - by, h + 2 * pad)
+        if bw < min_w or bh < min_h:
+            continue
+        # 【长宽比】: 弹窗接近方形(实测约 470x340 ≈ 1.38)。没有这条会误报地图
+        # 顶部的亮天空条带(实测 1216x183, 比例 6.6)。
+        if not (ar_lo <= bw / float(max(1, bh)) <= ar_hi):
+            continue
+        bcx, bcy = bx + bw / 2.0, by + bh / 2.0
+        if not (cx_lo * fw <= bcx <= cx_hi * fw
+                and cy_lo * fh <= bcy <= cy_hi * fh):
+            continue
+        inner = gray[by + 6:by + bh - 6, bx + 6:bx + bw - 6]
+        if inner.size and float(inner.std()) > max_std:
+            continue
+        return True, [bx, by, bw, bh]
+    return False, None
+
+
 def target_is_foreground(window_title):
     import pygetwindow as gw
 
@@ -7259,6 +7323,13 @@ def main():
     camera_alarm_enabled = bool(_cam_cfg.get("enabled", True))
     camera_alarm_seconds = float(_cam_cfg.get("seconds", 8.0))
     camera_alarm_beeps = int(_cam_cfg.get("beeps", 3))
+    # 【测谎弹窗早期报警】: "谎探测仪"弹窗一出现就蜂鸣(不等滞后启发式)
+    _lie_cfg = cfg.get("lie_detector_alarm", {})
+    lie_alarm_enabled = bool(_lie_cfg.get("enabled", True))
+    lie_alarm_beeps = int(_lie_cfg.get("beeps", 5))
+    lie_alarm_cooldown = float(_lie_cfg.get("cooldown_seconds", 15.0))
+    _lie_last_alarm = 0.0
+    _lie_streak = 0        # 连续命中帧数(2帧确认, 防单帧抖动)
 
     def _play_camera_alarm(beeps=3):
         """蜂鸣提醒(后台线程, 不阻塞主循环): 提示测谎弹窗可能已出现。"""
@@ -8318,6 +8389,35 @@ def main():
             if (policy._safe_active or policy._recall_active):
                 if isinstance(command, str) and command.startswith("attack"):
                     command, reason = "none", "trip_no_attack"
+
+            # ---- 【测谎弹窗早期报警】(用户要求 2026-09-10) ----
+            # "谎探测仪"弹窗一出现就报警(不等"怪物=0"那种滞后启发式: 弹窗弹出
+            # 时 3 秒倒计时已经开始, 用户反馈"已经慢了")。
+            # 检测方式: 画面中央的大块中性浅灰面板(见 detect_lie_detector)。
+            # 命中 -> 立刻蜂鸣(比画面异常报警更急) + 醒目日志 + 弹窗期间抑制
+            # 机器人按键(避免把按键打进弹窗/让角色乱跑)。
+            _lie_hit = False
+            if lie_alarm_enabled:
+                try:
+                    _lie_hit, _lie_box = detect_lie_detector(frame, cfg)
+                except Exception:
+                    _lie_hit, _lie_box = False, None
+                # 连续 2 帧确认(单帧抖动不报警、也不抑制按键)
+                _lie_streak = (_lie_streak + 1) if _lie_hit else 0
+                if _lie_streak >= 2:
+                    if now - _lie_last_alarm >= lie_alarm_cooldown:
+                        _lie_last_alarm = now
+                        _play_camera_alarm(beeps=lie_alarm_beeps)
+                        logger.warning(
+                            f"[测谎弹窗] 检测到\"谎探测仪\"弹窗! 面板="
+                            f"{_lie_box} —— 3秒后开始测谎小游戏, 请立即切到游戏"
+                            f"前往安全地点(已响 {lie_alarm_beeps} 声)")
+                    command, reason = "none", "lie_detector"
+                    executor.release_all()
+                elif _lie_last_alarm and now - _lie_last_alarm > 3.0:
+                    # 弹窗消失后重置(下次弹出重新报警)
+                    _lie_last_alarm = 0.0
+                    _lie_streak = 0
 
             # ---- 测谎提醒(画面异常检测) ----
             # 测谎弹窗弹出时画面被替换(今天18:24实锤): 怪物数=0 + 小地图坐标
