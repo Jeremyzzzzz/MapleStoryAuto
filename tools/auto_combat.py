@@ -5204,7 +5204,12 @@ class PauseController:
                 elif name == self.quit_key:
                     self.request_quit()
                     print("[hotkey] quit requested", flush=True)
-                elif name in ("f1", "f2", "f3", "f4", "f6", "f10", "f11"):
+                # 【功能键事件】(2026-09-12): 原来只捕获 f1/f2/f3/f4/f6/f10/f11 ——
+                # 所以 bat 里写的"F5 清空录制"其实是死代码, 按了没反应。现在补上
+                # f5(遇玩家挂机开关) / f7(保存航点) / f12(清空录制)。
+                # 注意 f8=暂停恢复, f9=退出(quit_key), 不要占用。
+                elif name in ("f1", "f2", "f3", "f4", "f5", "f6", "f7",
+                              "f10", "f11", "f12"):
                     with self._lock:
                         self.fn_events.append(name)
                 else:
@@ -5793,6 +5798,13 @@ def render_info_panel(
     if getattr(policy, "_mini", None) is not None and policy._mini.get("map_norm"):
         _mn = policy._mini["map_norm"]
         text(f"小地图位置  norm=({_mn[0]:.4f},{_mn[1]:.4f})", (0, 255, 255))
+    # 【遇玩家挂机】(用户 2026-09-12): F5 切换, 状态常显在面板上。
+    #   开 = 绿色(检测到其他玩家就暂停挂机) / 关 = 灰色(遇到玩家继续挂机)
+    _opp_on = bool(getattr(policy, "_other_player_pause_on", False))
+    if _opp_on:
+        text("遇玩家挂机  ● 开 (F5 切换)", (0, 255, 120), size=0.62, weight=2)
+    else:
+        text("遇玩家挂机  ○ 关 (F5 切换)", (150, 150, 160), size=0.62, weight=2)
 
     # ---- vitals ------------------------------------------------------------
     section("状态与战斗")
@@ -7692,9 +7704,10 @@ def main():
     OTHER_PLAYER_RESUME_DELAY = float(
         cfg.get("minimap", {}).get("other_player_resume_seconds", 2.0)
     )  # 红点消失多久自动恢复挂机(用户要求: 消失立即恢复, 2s只是跨帧确认防闪烁)
-    # 红点挂机总开关: 默认true; 沼泽地2玩家多, 用户要求暂时关闭(false)
-    OTHER_PLAYER_PAUSE_ENABLED = bool(
-        cfg.get("minimap", {}).get("other_player_pause_enabled", True)
+    # 【遇玩家挂机总开关】(用户 2026-09-12): 改为 F5 现场切换, 默认关。
+    # 初始值 = config minimap.other_player_pause_enabled(默认 false = 不挂机)。
+    other_player_pause_on = bool(
+        cfg.get("minimap", {}).get("other_player_pause_enabled", False)
     )
     # ---- 安全点定时进商城(测谎仪规避)状态 ----
     # 状态: "" 空闲 / "walk" 走向安全点 / "wait_t" 到点等5s / "wait_esc" 进商城后等10s / "wrap" 收尾
@@ -7793,10 +7806,13 @@ def main():
             # 小地图稳定坐标: 每帧定位玩家在地图里的左右位置
             mini = _minimap_players.get("player")
             policy._mini = mini
-            # 【2026-09-08 暂时关闭红点挂机】: 沼泽地2经常遇到其他玩家,
-            # 红点一出现就挂机太频繁——检测照常(红点HUD显示), 但不再
-            # set_player_pause; 重新开启: minimap.other_player_pause_enabled=true
-            if OTHER_PLAYER_PAUSE_ENABLED:
+            # 【遇玩家挂机开关】(用户 2026-09-12): 由 F5 现场切换, 默认【关】——
+            # 关=遇到其他玩家继续挂机(沼泽地2玩家多, 频繁暂停很烦);
+            # 开=检测到小地图红点就暂停挂机(保持喝药, 不攻击/不移动), 红点消失
+            # 后 other_player_resume_seconds 秒自动恢复。
+            # 初始值取 config minimap.other_player_pause_enabled(默认 false)。
+            policy._other_player_pause_on = other_player_pause_on
+            if other_player_pause_on:
                 if _has_other:
                     _strip_clear_since = None  # 红点在场: 清掉"消失计时"
                     if _strip_first_seen is None:
@@ -8238,7 +8254,29 @@ def main():
                                 f"[热键] F4 开始路线巡航 ({len(waypoint_patrol.waypoints)} 个点, "
                                 f"起点→终点→起点往返)")
                 elif fn == "f5":
-                    # F5: 清空录制(停巡航 + 清内存点, 磁盘存档保留)
+                    # 【F5: 切换"遇到其他玩家是否停止挂机"】(用户要求 2026-09-12)
+                    # 按一下开/按一下关, 当前状态显示在屏幕左侧面板"遇玩家挂机"一行。
+                    # 开: 小地图出现红点(其他玩家)就暂停挂机(保留喝药), 红点消失若干秒
+                    #     后自动恢复;
+                    # 关: 遇到玩家照常挂机(默认)。
+                    other_player_pause_on = not other_player_pause_on
+                    policy._other_player_pause_on = other_player_pause_on
+                    if other_player_pause_on:
+                        logger.warning(
+                            "[热键] F5 遇玩家挂机 = 【开】: 检测到其他玩家(小地图红点)"
+                            "就暂停挂机, 红点消失后自动恢复")
+                    else:
+                        # 关闭时若正因"遇玩家"暂停着 -> 立即恢复挂机
+                        if pause_control.player_pause:
+                            pause_control.resume_from_player_pause()
+                        _strip_first_seen = None
+                        _strip_clear_since = None
+                        logger.warning(
+                            "[热键] F5 遇玩家挂机 = 【关】: 遇到其他玩家继续挂机")
+                elif fn == "f12":
+                    # 【F12: 清空录制】(2026-09-12: 从 F5 挪过来 —— F5 现在是"遇玩家
+                    # 挂机"开关, 而 F9 是退出键不能占用)
+                    # 停巡航 + 清内存点, 磁盘存档保留
                     _reset_trip_states()   # 全部重新来: 取消安全点/恢复行程
                     recorder.is_recording = False
                     waypoint_patrol.is_recording = False
@@ -8246,7 +8284,7 @@ def main():
                     waypoint_patrol.is_recording_recall = False
                     waypoint_patrol.stop_patrol()
                     waypoint_patrol.clear()
-                    logger.info("[热键] F5 录制已清空(内存)")
+                    logger.info("[热键] F12 录制已清空(内存)")
                 elif fn == "f6":
                     # F6: 一键重定位(纠偏)——用户手动走到"第一个点位"的位置后按 F6:
                     # 取当前玩家小地图坐标, 与 waypoints[0] 的偏差 = 全局偏移,
