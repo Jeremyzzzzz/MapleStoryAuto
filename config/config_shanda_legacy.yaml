@@ -200,6 +200,11 @@ minimap_waypoint:
   rest_hold_seconds: 0.5 # 坐椅子按键时长(秒)
   rest_sit_delay: 3.0    # 到达初始点后等待秒数再按X坐椅子(刚停稳按坐不上)
   recover_y_tol: 0.03    # 跳台阶失败恢复: 同平台Y容差(norm抖动±0.016, 平台间差>0.05), 只找同平台点避免死循环跳
+  # 【纵向不可达跳过】(2026-09-10 修死循环): move 段目标在别的平台(Y差>0.10)时,
+  # 若 |角色Y − 目标Y| 连续这么多秒没有进展, 判定"同层走不到"跳过该点继续。
+  # 修的是"人物围着目标X来回走死循环": 旧判据要求横向稳定在 ±0.003, 而步进接近
+  # 目标时抖动 ±0.03 -> 永远不满足 -> 段 40s 超时从头开始 -> 同一平台来回走。
+  y_progress_timeout: 3.0
 
 nametag:
   enable: True
@@ -358,6 +363,9 @@ combat_advisory:
 
 # Auto combat loop (tools/auto_combat.py) tuning.
 auto_combat:
+  # 【喂宠物】(用户 2026-09-11): 原来 30 分钟一次太久 —— 隔夜挂机回来发现宠物
+  # 因饥饿感下线了。改成每 10 分钟按一次喂食键(默认 N 键, 见 characters.feed)。
+  feed_interval_seconds: 600   # 喂宠物间隔(秒): 10 分钟一次
   attack_cooldown_min: 0.05     # 攻击间隔下限(秒) (2026-09-08 攻速恢复: 0.10→0.05 提高一倍)
   attack_cooldown_max: 0.10     # 攻击间隔上限(秒) (2026-09-08 攻速恢复: 0.20→0.10 提高一倍)
   attack_hold_seconds: 0.05     # hold duration for attack key press

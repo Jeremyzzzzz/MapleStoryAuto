@@ -1053,7 +1053,7 @@ class CombatExecutor:
         self.up_key = keys.get("up") or "up"
         self.down_key = keys.get("down") or "down"
         self.pickup_key = keys.get("pickup") or "z"  # 捡东西键(已停用, 保留字段)
-        self.feed_key = keys.get("feed") or "n"      # 喂宠物键(每30分钟按一次)
+        self.feed_key = keys.get("feed") or "n"      # 喂宠物键(默认每10分钟按一次)
         self.dry_run = dry_run
         self.counts = {}
         self.pressed_keys = []  # key names "pressed" in dry-run for tests
@@ -1067,7 +1067,11 @@ class CombatExecutor:
         # 避免"怪在玩家后方却朝正前方攻击"(模拟朝向与实际脱节的偶发问题)。
         self._real_dir = None         # "left"/"right", None=未知
         self._real_dir_ts = 0.0       # 最近一次真实朝向更新时间
-        self.feed_interval = 30 * 60    # 喂宠物键(N)间隔(秒): 每30分钟按一次
+        # 【喂宠物间隔】(2026-09-11 用户要求 30分钟 -> 10分钟): 30 分钟太久,
+        # 隔夜挂机时宠物因饥饿感下线了。改成每 10 分钟按一次喂食键。
+        # 可由 config auto_combat.feed_interval_seconds 覆盖。
+        self.feed_interval = float(
+            cfg.get("auto_combat", {}).get("feed_interval_seconds", 10 * 60))
         self.last_feed_time = float("-inf")
 
         auto_cfg = cfg.get("auto_combat", {})
@@ -1160,7 +1164,12 @@ class CombatExecutor:
         self.held_vert = direction
 
     def _tap_feed(self, now):
-        """每30分钟按 N 键喂宠物一次(用户带了宠物, 不用再按 Z 捡东西)。"""
+        """按 N 键喂宠物一次(用户带了宠物, 不用再按 Z 捡东西)。
+
+        【2026-09-11 用户要求 30分钟 -> 10分钟】: 30 分钟间隔太久, 隔夜挂机回来
+        发现宠物因为饥饿感下线了(宠物下线 = 不捡东西/不帮忙)。现在每 10 分钟喂
+        一次, 由 auto_combat.feed_interval_seconds 配置(默认 600 秒)。
+        """
         if not self.feed_key:
             return
         if now - self.last_feed_time < self.feed_interval:
@@ -1216,7 +1225,7 @@ class CombatExecutor:
             return
         # 挂机(检测到其他玩家)时停止喂食等一切行为, 只喝药
         if not suppress_feed:
-            self._tap_feed(now)  # 每30分钟按N喂宠物(不管什么命令都定时触发)
+            self._tap_feed(now)  # 每10分钟按N喂宠物(不管什么命令都定时触发)
 
         if command == "none":
             self._set_move(None)
@@ -3508,6 +3517,11 @@ class MinimapWaypointPatrol:
         # 左右走就能到)。norm 抖动约 ±0.016, 平台间Y差通常 >0.05, 取 0.03
         # 覆盖抖动同时排除相邻平台点(否则恢复点到上面平台会死循环跳)。
         self.recover_y_tol = float(wp.get("recover_y_tol", 0.03))
+        # 【纵向不可达判定】(2026-09-10): move 段目标在别的平台(Y 差 > 0.10)时,
+        # 若 |角色Y−目标Y| 连续这么久没有进展, 判定"同层走不到"跳过该点。
+        # 修的是"两个普通点 Y 不同 -> 人物围着目标X来回走死循环"(旧判据要求
+        # 横向稳定在 ±0.003, 而步进接近时抖动 ±0.03, 永远不满足)。
+        self.y_progress_timeout = float(wp.get("y_progress_timeout", 3.0))
         # 小步步进冷却间隔: 每次 step 后等这么久再允许下一步, 让小地图坐标检测
         # 有时间更新——否则每帧都 step(12fps≈83ms/步), 坐标还没反应又挪下一步,
         # 看起来碎步很多且容易在台阶边缘踏空掉下去
@@ -3572,6 +3586,8 @@ class MinimapWaypointPatrol:
         # move 段: 纵向不可达死循环检测位置(x已对齐但y差远/不同平台)
         self._vert_stuck_pos = None
         self._vert_stuck_ts = 0.0
+        self._y_best = None           # 本段 |角色Y−目标Y| 历史最小值
+        self._y_best_ts = 0.0         # 该最小值最后一次刷新的时刻
         self._step_until = 0.0        # 小步步进冷却: 下次允许 step 的时刻
         self._near_start = 0.0        # move/climb 段"稳定到达"计时起点
         self.last_archive = None      # 最近一次生成的路线存档路径(供用户检查)
@@ -3736,6 +3752,8 @@ class MinimapWaypointPatrol:
         self._move_stuck_ts = 0.0
         self._vert_stuck_pos = None
         self._vert_stuck_ts = 0.0
+        self._y_best = None          # 本段 |角色Y−目标Y| 的历史最小值
+        self._y_best_ts = 0.0        # 该最小值最后一次被刷新的时刻
         self._step_until = 0.0
         self._near_start = 0.0
 
@@ -3902,23 +3920,30 @@ class MinimapWaypointPatrol:
             #   - 角色 Y 与目标的差距持续 > 0.10(ny 没接近目标, 即没在下降)
             #   - 横向持续对齐(dx 稳定在 ±0.05, 不依赖单帧)
             #   - 持续超时 4s
-            if (abs(dx) <= 0.05 and dy > 0.10
-                    and (tny - ny) > 0.10
-                    and now - self._point_start > 4.0):
-                # 记录首帧满足条件时刻; 需持续 1.5s 才确认(防下坡瞬时波动)
-                if self._vert_stuck_pos is None:
-                    self._vert_stuck_pos = (nx, ny)
-                    self._vert_stuck_ts = now
-                elif (abs(nx - self._vert_stuck_pos[0]) < 0.003
-                        and now - self._vert_stuck_ts > 1.5):
+            # 【2026-09-10 修: 改看"Y 方向有没有进展"】
+            # 旧判据要求"横向持续对齐在 ±0.003" —— 但步进接近目标时会围绕目标 X
+            # 小幅来回(实测 ±0.03, 见日志 dx=+0.0126/-0.0085/-0.0295), 这个条件
+            # 【永远不满足】-> 不跳过 -> 段 40s 超时从头开始 -> 人物在同一平台上
+            # 围着目标 X 来回走死循环(用户反馈"在高平台上来回走")。
+            # 现在改为: 记录本段内 |角色Y − 目标Y| 的最小值, 若连续
+            # y_progress_timeout(默认3s)没有刷新进展, 且本段已跑 > 4s,
+            # 就判定"走不到那个平台"跳过该点(与横向是否对齐无关)。
+            if abs(dy) > 0.10 and now - self._point_start > 4.0:
+                _gap = abs(ny - tny)
+                if self._y_best is None or _gap < self._y_best - 0.005:
+                    self._y_best = _gap
+                    self._y_best_ts = now
+                elif now - self._y_best_ts > self.y_progress_timeout:
                     logger.warning(
                         f"[wp] 段{self.idx + 1} move 目标在不同平台"
-                        f"(x对齐: dx={dx:+.4f}, 角色Y未下降: dy={dy:+.3f}), "
+                        f"(目标Y={tny:.4f} 角色Y={ny:.4f} 差{_gap:.3f}, "
+                        f"{self.y_progress_timeout:.0f}s 无进展, dx={dx:+.4f}), "
                         f"同层走不到, 跳过该点继续")
                     self._next()
                     return "none", "wp_skip_unreachable"
             else:
-                self._vert_stuck_pos = None
+                self._y_best = None
+                self._y_best_ts = 0.0
             # 步进极限兜底: 已非常接近(|dx|<=0.02)但按键步进粒度(≈0.004)无法精确到
             # 4位一致, 且角色 2s 内位置基本不变(微调按键已无效果) -> 接受当前最近
             # 位置为到达(避免无限微调死锁; 此时与点位差已不足 2px 小地图)
